@@ -1,0 +1,39 @@
+schema: '2.0'
+stages:
+  preprocess:
+    cmd: python icu_preprocessing_pipeline.py
+    deps:
+    - path: data 
+        preparation/mimic_processed/08_feature_matrix_raw_20260528_1247.parquet
+      hash: md5
+      md5: 03d48101420bbd36419736618fc91cea
+      size: 6495779
+    - path: icu_preprocessing_pipeline.py
+      hash: md5
+      md5: 1b017584d2f7bef89cac4e2834d1d4b8
+      size: 12972
+    outs:
+    - path: mimic_processed/X_test.npy
+      hash: md5
+      md5: 33badb1540c478e6f990f10c2d1b1bd3
+      size: 6717440
+    - path: mimic_processed/X_train.npy
+      hash: md5
+      md5: 1d7c9458019e65ad14e5dc10f778d332
+      size: 51538720
+    - path: mimic_processed/feature_names_final.csv
+      hash: md5
+      md5: f6482ab9c89d7de9937d025da15acc15
+      size: 1228
+    - path: mimic_processed/preprocessing_pipeline.joblib
+      hash: md5
+      md5: 66a76d2e754471df2c5a4e50634ffd7c
+      size: 15599
+    - path: mimic_processed/y_test.npy
+      hash: md5
+      md5: 26516d558cc6ef478c2da84ad178555e
+      size: 68672
+    - path: mimic_processed/y_train.npy
+      hash: md5
+      md5: b738702471378fd295275384fca1786e
+      size: 526032
