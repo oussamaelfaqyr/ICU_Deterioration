@@ -1,0 +1,13 @@
+stages:
+  preprocess:
+    cmd: python icu_preprocessing_pipeline.py
+    deps:
+      - icu_preprocessing_pipeline.py
+      - data preparation/mimic_processed
+    outs:
+      - mimic_processed/preprocessing_pipeline.joblib
+      - mimic_processed/feature_names_final.csv
+      - mimic_processed/X_train.npy
+      - mimic_processed/X_test.npy
+      - mimic_processed/y_train.npy
+      - mimic_processed/y_test.npy
