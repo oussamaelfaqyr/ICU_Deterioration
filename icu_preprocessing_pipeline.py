@@ -26,11 +26,23 @@ warnings.filterwarnings("ignore")
 # 0. LOAD DATA
 # ─────────────────────────────────────────────
 
-base_dir = os.path.join(os.getcwd(), "data preparation/mimic_processed")
+base_dir = os.path.join(os.getcwd(), "data preparation", "mimic_processed")
 
-parquet_path = sorted(glob.glob(os.path.join(base_dir, "**", "*feature_matrix_raw*.parquet"), recursive=True))[0]
+pattern = os.path.join(base_dir, "**", "*feature_matrix_raw*.parquet")
+parquet_files = sorted(glob.glob(pattern, recursive=True))
+
+if len(parquet_files) == 0:
+    raise FileNotFoundError(
+        f"No parquet file found matching pattern:\n{pattern}\n"
+        f"Check your folder structure and file name."
+    )
+
+parquet_path = parquet_files[0]
+
 df = pd.read_parquet(parquet_path)
+
 print(f"Loaded: {df.shape[0]:,} rows × {df.shape[1]} columns")
+print(f"File used: {parquet_path}")
 
 
 # ─────────────────────────────────────────────
@@ -254,6 +266,13 @@ output_dir = os.path.join(os.getcwd(), "mimic_processed")
 os.makedirs(output_dir, exist_ok=True)
 
 # Save processed arrays
+# Save processed arrays
+# Save pre-SMOTE train (raw) and SMOTE versions for downstream tuning compatibility
+np.save(os.path.join(output_dir, "X_train_raw.npy"), X_train_pp)
+np.save(os.path.join(output_dir, "y_train_raw.npy"), y_train.values)
+np.save(os.path.join(output_dir, "X_train_smote.npy"), X_train_bal)
+np.save(os.path.join(output_dir, "y_train_smote.npy"), y_train_bal)
+# Backwards-compatible filenames used elsewhere
 np.save(os.path.join(output_dir, "X_train.npy"), X_train_bal)
 np.save(os.path.join(output_dir, "X_test.npy"),  X_test_pp)
 np.save(os.path.join(output_dir, "y_train.npy"), y_train_bal)

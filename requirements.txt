@@ -5,3 +5,6 @@ scikit-learn
 imbalanced-learn
 joblib
 dvc
+xgboost
+catboost
+optuna

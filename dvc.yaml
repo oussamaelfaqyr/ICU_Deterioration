@@ -1,13 +1,33 @@
+# Add this stage to your existing dvc.yaml
+# Run: dvc repro
+
 stages:
   preprocess:
     cmd: python icu_preprocessing_pipeline.py
     deps:
       - icu_preprocessing_pipeline.py
-      - data preparation/mimic_processed
+      - data preparation/mimic_processed/08_feature_matrix_raw_20260528_1247.parquet
     outs:
-      - mimic_processed/preprocessing_pipeline.joblib
-      - mimic_processed/feature_names_final.csv
       - mimic_processed/X_train.npy
       - mimic_processed/X_test.npy
       - mimic_processed/y_train.npy
       - mimic_processed/y_test.npy
+      - mimic_processed/feature_names_final.csv
+      - mimic_processed/preprocessing_pipeline.joblib
+
+  train:
+    cmd: python icu_train.py
+    deps:
+      - icu_train.py
+      - mimic_processed/X_train.npy
+      - mimic_processed/X_test.npy
+      - mimic_processed/y_train.npy
+      - mimic_processed/y_test.npy
+      - mimic_processed/feature_names_final.csv
+    outs:
+      - models/logistic_regression.joblib
+      - models/lightgbm_model.joblib
+      - plots/
+    metrics:
+      - metrics/metrics.json:
+          cache: false
