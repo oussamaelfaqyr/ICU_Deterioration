@@ -1,1 +1,29 @@
-/plots
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# DVC
+/plots/
+
+# MLflow
+mlflow.db
+mlruns/
+
+# Prediction log (runtime, not committed)
+prediction_log.jsonl
+
+# Docker / compose volumes (local dev)
+.env
+
+# Data artefacts (tracked by DVC, not git)
+mimic_processed/
+data preparation/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db

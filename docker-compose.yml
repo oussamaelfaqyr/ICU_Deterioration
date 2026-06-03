@@ -1,0 +1,135 @@
+version: "3.9"
+
+# Shared network so every service can reach each other by hostname
+networks:
+  icu-net:
+    driver: bridge
+
+# Persistent volumes
+volumes:
+  mlflow-db:
+  prometheus-data:
+  grafana-data:
+  airflow-db:
+  airflow-logs:
+
+services:
+
+  # ── 1. FastAPI inference service ─────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: icu-api
+    ports:
+      - "8000:8000"
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      # Mount live artefacts so you don't need to rebuild the image after dvc repro
+      - ./mimic_processed:/app/mimic_processed:ro
+      - ./mlruns:/app/mlruns
+      - ./mlflow.db:/app/mlflow.db
+      - ./prediction_log.jsonl:/app/prediction_log.jsonl
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    networks:
+      - icu-net
+    restart: unless-stopped
+
+  # ── 2. MLflow tracking server ────────────────────────────────────────────────
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.13.0
+    container_name: icu-mlflow
+    ports:
+      - "5000:5000"
+    command: >
+      mlflow server
+        --backend-store-uri sqlite:////mlflow/mlflow.db
+        --default-artifact-root /mlflow/mlruns
+        --host 0.0.0.0
+        --port 5000
+    volumes:
+      - mlflow-db:/mlflow
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - icu-net
+    restart: unless-stopped
+
+  # ── 3. Prometheus ────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: icu-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"          # allows hot-reload via /-/reload
+      - "--storage.tsdb.retention.time=30d"
+    networks:
+      - icu-net
+    restart: unless-stopped
+
+  # ── 4. Grafana ───────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: icu-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "icuadmin"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/icu_dashboard.json
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    networks:
+      - icu-net
+    restart: unless-stopped
+
+  # ── 5. Airflow (standalone — easiest for local dev) ──────────────────────────
+  airflow:
+    image: apache/airflow:2.9.1-python3.11
+    container_name: icu-airflow
+    ports:
+      - "8080:8080"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__WEBSERVER__SECRET_KEY: "icu-airflow-secret-change-me"
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
+      ICU_PROJECT_DIR: /opt/icu_project
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - airflow-logs:/opt/airflow/logs
+      - airflow-db:/opt/airflow
+      # Mount the ICU project so the DAG can run dvc repro
+      - .:/opt/icu_project
+    command: >
+      bash -c "
+        airflow db migrate &&
+        airflow users create --username admin --password admin
+          --firstname ICU --lastname Admin --role Admin --email admin@icu.local &&
+        airflow webserver --port 8080 &
+        airflow scheduler
+      "
+    depends_on:
+      - mlflow
+    networks:
+      - icu-net
+    restart: unless-stopped

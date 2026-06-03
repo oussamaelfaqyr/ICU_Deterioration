@@ -62,6 +62,7 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s | %(levelname)s | %(message)s",
                     datefmt="%H:%M:%S")
 log = logging.getLogger("icu_train")
+logging.getLogger("mlflow").setLevel(logging.ERROR)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG  (all overridable via env vars or params.yaml)
@@ -75,7 +76,7 @@ for d in [PLOTS_DIR, MODELS_DIR, METRICS_DIR]:
 
 EXPERIMENT    = "ICU_Deterioration_v2"
 RECALL_TARGET = float(os.getenv("RECALL_TARGET",     "0.80"))
-ENABLE_OPTUNA = os.getenv("ENABLE_OPTUNA",  "1") == "1"
+ENABLE_OPTUNA = os.getenv("ENABLE_OPTUNA",  "0") == "1"
 OPTUNA_TRIALS = int(os.getenv("OPTUNA_TRIALS",       "25"))
 CV_FOLDS      = int(os.getenv("CV_FOLDS",            "5"))
 ENABLE_SHAP   = os.getenv("ENABLE_SHAP",   "1") == "1"
@@ -160,7 +161,7 @@ def load_training_artifacts(base_dir: Path):
 def timer(label):
     t0 = time.perf_counter()
     yield
-    log.info(f"  ⏱  {label}: {time.perf_counter()-t0:.1f}s")
+    log.info(f"  [Timer] {label}: {time.perf_counter()-t0:.1f}s")
 
 def threshold_at_recall(y_true, y_prob, min_recall=0.80):
     prec, rec, thr = precision_recall_curve(y_true, y_prob)
@@ -199,7 +200,7 @@ def _objective_lgbm(trial, X_raw, y_raw, pos_w, n_folds, rs):
         colsample_bytree=trial.suggest_float("colsample_bytree",0.6,1.0),
         reg_alpha      = trial.suggest_float("reg_alpha",     1e-4, 1.0, log=True),
         reg_lambda     = trial.suggest_float("reg_lambda",    1e-4, 1.0, log=True),
-        scale_pos_weight=pos_w, random_state=rs, n_jobs=-1, verbose=-1,
+        scale_pos_weight=1.0, random_state=rs, n_jobs=-1, verbose=-1,
     )
     skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=rs)
     scores = []
@@ -224,7 +225,7 @@ def _objective_xgb(trial, X_raw, y_raw, pos_w, n_folds, rs):
         colsample_bytree=trial.suggest_float("colsample_bytree",0.5,1.0),
         reg_alpha      = trial.suggest_float("reg_alpha",     1e-4, 1.0, log=True),
         reg_lambda     = trial.suggest_float("reg_lambda",    1e-4, 1.0, log=True),
-        scale_pos_weight=pos_w, eval_metric="logloss",
+        scale_pos_weight=1.0, eval_metric="logloss",
         random_state=rs, n_jobs=-1,
     )
     skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=rs)
@@ -332,7 +333,13 @@ def plot_single_model(name, y_true, y_prob, threshold, color):
 def plot_shap_full(name, model, X_sample, feature_names):
     paths = []
     try:
-        expl = shap.TreeExplainer(model)
+        # Extract base estimator if model is wrapped in CalibratedClassifierCV
+        base_model = model.calibrated_classifiers_[0].estimator if hasattr(model, "calibrated_classifiers_") else model
+        
+        if name == "LogisticRegression":
+            expl = shap.LinearExplainer(base_model, X_sample)
+        else:
+            expl = shap.TreeExplainer(base_model)
         sv   = expl.shap_values(X_sample)
         if isinstance(sv, list): sv = sv[1]
 
@@ -544,7 +551,7 @@ def run_model(name, model, X_smote, y_smote, X_val, y_val, X_test, y_test,
     """
     Train on SMOTE data, early-stop on val, evaluate on test (never used before).
     """
-    log.info(f"{'─'*55}")
+    log.info(f"{'-'*55}")
     log.info(f"  Training: {name}")
     color = COLORS.get(name,"#888888")
 
@@ -562,18 +569,22 @@ def run_model(name, model, X_smote, y_smote, X_val, y_val, X_test, y_test,
         with timer(f"fit {name}"):
             if name == "LightGBM":
                 model.fit(X_smote, y_smote,
-                          eval_set=[(X_val, y_val)],      # ← val, NOT test
-                          callbacks=[lgb.early_stopping(50, verbose=False),
-                                     lgb.log_evaluation(200)])
+                          eval_set=[(X_val, y_val)],      # <- val, NOT test
+                          callbacks=[lgb.early_stopping(50, verbose=True),
+                                     lgb.log_evaluation(1)])
                 mlflow.log_param("best_iteration", model.best_iteration_)
             elif name == "XGBoost":
                 try:
                     model.fit(X_smote, y_smote,
-                              eval_set=[(X_val, y_val)],  # ← val, NOT test
+                              eval_set=[(X_val, y_val)],
                               early_stopping_rounds=50, verbose=False)
                 except TypeError:
                     model.fit(X_smote, y_smote,
                               eval_set=[(X_val, y_val)], verbose=False)
+                # Calibrate using cross-val on held-out val set (cv=5 works on all sklearn versions)
+                log.info("  Calibrating XGBoost probabilities (cv=5, isotonic)...")
+                model = CalibratedClassifierCV(model, cv=5, method='isotonic')
+                model.fit(X_val, y_val)
             elif name == "CatBoost":
                 model.fit(X_smote, y_smote,
                           eval_set=(X_val, y_val),
@@ -599,9 +610,16 @@ def run_model(name, model, X_smote, y_smote, X_val, y_val, X_test, y_test,
 
         # Feature importance (only when artifact saving is enabled)
         if SAVE_ARTIFACTS:
-            fi = getattr(model, "feature_importances_", None)
-            if fi is None and hasattr(model, "get_feature_importance"):
-                fi = model.get_feature_importance()
+            # Unwrap CalibratedClassifierCV → base estimator for feature importance
+            if hasattr(model, "calibrated_classifiers_"):
+                base_model_fi = model.calibrated_classifiers_[0].estimator
+            elif hasattr(model, "estimator"):
+                base_model_fi = model.estimator
+            else:
+                base_model_fi = model
+            fi = getattr(base_model_fi, "feature_importances_", None)
+            if fi is None and hasattr(base_model_fi, "get_feature_importance"):
+                fi = base_model_fi.get_feature_importance()
             if fi is not None:
                 fi_df = (pd.DataFrame({"feature":feature_names,"importance":fi})
                          .sort_values("importance",ascending=False))
@@ -621,8 +639,9 @@ def run_model(name, model, X_smote, y_smote, X_val, y_val, X_test, y_test,
         # Permutation importance (on val set — unbiased, fast)
         if SAVE_ARTIFACTS and ENABLE_PERM and name in {"LightGBM","XGBoost","RandomForest"}:
             with timer(f"PermImp {name}"):
+                repeats = 3 if name == "RandomForest" else 10
                 pi_path = plot_permutation_importance(name, model, X_val, y_val,
-                                                       feature_names, color)
+                                                       feature_names, color, n_repeats=repeats)
             if pi_path: artifacts.append(pi_path)
 
         for p in artifacts:
@@ -630,8 +649,8 @@ def run_model(name, model, X_smote, y_smote, X_val, y_val, X_test, y_test,
                 mlflow.log_artifact(str(p))
 
         # Save model only via MLflow flavor to avoid duplicating large binaries on disk.
-        if name=="LightGBM":   mlflow.lightgbm.log_model(model, artifact_path="model")
-        else:                  mlflow.sklearn.log_model(model,   artifact_path="model")
+        if name=="LightGBM":   mlflow.lightgbm.log_model(model, name="model")
+        else:                  mlflow.sklearn.log_model(model,   name="model")
 
         log.info(f"  Run ID: {run.info.run_id}")
 
@@ -643,16 +662,16 @@ def run_model(name, model, X_smote, y_smote, X_val, y_val, X_test, y_test,
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
-    log.info(f"ICU Training Pipeline v2 — {datetime.now().strftime('%Y%m%d_%H%M')}")
+    log.info(f"ICU Training Pipeline v2 - {datetime.now().strftime('%Y%m%d_%H%M')}")
     log.info("Fixes: (1) Optuna on raw data  (2) Early-stop on val  (3) Test used once")
 
     # ── Load ─────────────────────────────────────────────────────────────────
     X_raw, y_raw, X_smote, y_smote, X_val, y_val, X_test, y_test, feature_names = load_training_artifacts(BASE_DIR)
 
-    log.info(f"X_raw   {X_raw.shape}   pos={y_raw.mean():.3f}  ← real prevalence for Optuna")
-    log.info(f"X_smote {X_smote.shape} pos={y_smote.mean():.3f} ← for final training")
-    log.info(f"X_val   {X_val.shape}   pos={y_val.mean():.3f}  ← for early stopping")
-    log.info(f"X_test  {X_test.shape}  pos={y_test.mean():.3f} ← touched once at end")
+    log.info(f"X_raw   {X_raw.shape}   pos={y_raw.mean():.3f}  <- real prevalence for Optuna")
+    log.info(f"X_smote {X_smote.shape} pos={y_smote.mean():.3f} <- for final training")
+    log.info(f"X_val   {X_val.shape}   pos={y_val.mean():.3f}  <- for early stopping")
+    log.info(f"X_test  {X_test.shape}  pos={y_test.mean():.3f} <- touched once at end")
 
     n_pos      = int(y_test.sum())
     pos_weight = (len(y_test)-n_pos) / n_pos
@@ -666,10 +685,10 @@ def main():
     xgb_best,  xgb_cv   = {}, None
 
     if ENABLE_OPTUNA:
-        log.info(f"Optuna LightGBM — {OPTUNA_TRIALS} trials, {CV_FOLDS}-fold CV on RAW data")
+        log.info(f"Optuna LightGBM - {OPTUNA_TRIALS} trials, {CV_FOLDS}-fold CV on RAW data")
         lgbm_best, lgbm_cv = run_optuna("lgbm", X_raw, y_raw, pos_weight,
                                          OPTUNA_TRIALS, CV_FOLDS, RANDOM_STATE)
-        log.info(f"Optuna XGBoost  — {OPTUNA_TRIALS} trials, {CV_FOLDS}-fold CV on RAW data")
+        log.info(f"Optuna XGBoost  - {OPTUNA_TRIALS} trials, {CV_FOLDS}-fold CV on RAW data")
         xgb_best,  xgb_cv  = run_optuna("xgb",  X_raw, y_raw, pos_weight,
                                           OPTUNA_TRIALS, CV_FOLDS, RANDOM_STATE)
 
@@ -677,12 +696,12 @@ def main():
     lgbm_params = {"objective":"binary","boosting_type":"gbdt","n_estimators":1000,
                    "learning_rate":0.05,"num_leaves":63,"max_depth":-1,
                    "min_child_samples":20,"subsample":0.8,"colsample_bytree":0.8,
-                   "scale_pos_weight":pos_weight,"reg_alpha":0.1,"reg_lambda":0.1,
+                   "scale_pos_weight":1.0,"reg_alpha":0.1,"reg_lambda":0.1,
                    "random_state":RANDOM_STATE,"n_jobs":-1,"verbose":-1}
     lgbm_params.update(lgbm_best)
 
     xgb_params  = {"n_estimators":500,"learning_rate":0.05,"max_depth":6,
-                   "scale_pos_weight":pos_weight,"eval_metric":"logloss",
+                   "scale_pos_weight":1.0,"eval_metric":"logloss",
                    "random_state":RANDOM_STATE,"n_jobs":-1}
     xgb_params.update(xgb_best)
 
@@ -699,8 +718,8 @@ def main():
          XGBClassifier(**xgb_params),
          {"optuna_cv_pr_auc":xgb_cv}),
         ("RandomForest",
-         RandomForestClassifier(n_estimators=500,class_weight="balanced",
-                                random_state=RANDOM_STATE,n_jobs=-1),
+         RandomForestClassifier(n_estimators=500, max_depth=10, min_samples_leaf=2,
+                                class_weight="balanced", random_state=RANDOM_STATE,n_jobs=-1),
          {}),
     ]
     if HAS_CATBOOST:
@@ -735,6 +754,18 @@ def main():
             mlflow.log_param("best_model", best)
             for k,v in all_results[best]["metrics"].items():
                 if isinstance(v,float): mlflow.log_metric(f"best_{k}",v)
+            
+            # Register the best model to the MLflow Model Registry
+            best_run_id = all_results[best]["run_id"]
+            model_uri = f"runs:/{best_run_id}/model"
+            registry_name = "ICU_Deterioration_Model"
+            log.info(f"  Registering best model '{best}' to MLflow Registry as '{registry_name}'")
+            mv = mlflow.register_model(model_uri, registry_name)
+            
+            # Tag the model version with its PR-AUC so the promotion script can read it
+            client = mlflow.tracking.MlflowClient()
+            client.set_model_version_tag(registry_name, mv.version, "pr_auc", str(all_results[best]["metrics"]["pr_auc"]))
+            client.set_model_version_tag(registry_name, mv.version, "model_type", best)
 
     # ── Save metrics ──────────────────────────────────────────────────────────
     summary = to_py({n:r["metrics"] for n,r in all_results.items()})
@@ -751,8 +782,8 @@ def main():
     keys = ["auc_roc","pr_auc","brier","recall","precision","f1","fp"]
     w    = max(len(n) for n in all_results)+2
     hdr  = f"{'Metric':<14}" + "".join([f"{n:>{w}}" for n in all_results])
-    sep  = "─"*(14+w*len(all_results))
-    print(f"\n{'='*len(sep)}\n  FINAL RESULTS (test set — used once)\n{'='*len(sep)}")
+    sep  = "-"*(14+w*len(all_results))
+    print(f"\n{'='*len(sep)}\n  FINAL RESULTS (test set - used once)\n{'='*len(sep)}")
     print(hdr); print(sep)
     for k in keys:
         row = f"  {k:<12}"
@@ -762,10 +793,10 @@ def main():
         print(row)
     print(sep)
     best = max(all_results, key=lambda n: all_results[n]["metrics"]["pr_auc"])
-    print(f"\n  ★  Best (PR-AUC): {best}  →  {all_results[best]['metrics']['pr_auc']:.4f}")
-    print(f"\n  mlflow ui  →  http://127.0.0.1:5000")
-    print(f"  dvc exp show  →  compare experiments")
-    print(f"  Plots  →  {PLOTS_DIR}\n")
+    print(f"\n  *  Best (PR-AUC): {best}  ->  {all_results[best]['metrics']['pr_auc']:.4f}")
+    print(f"\n  mlflow ui  ->  http://127.0.0.1:5000")
+    print(f"  dvc exp show  ->  compare experiments")
+    print(f"  Plots  ->  {PLOTS_DIR}\n")
 
 if __name__ == "__main__":
     main()

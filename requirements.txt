@@ -7,4 +7,18 @@ joblib
 dvc
 xgboost
 catboost
+lightgbm
 optuna
+# --- FastAPI inference service ---
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+httpx>=0.27.0          # for test client
+# --- Explainability ---
+shap>=0.45.0
+# --- MLflow ---
+mlflow>=2.13.0
+# --- Monitoring ---
+prometheus-client>=0.20.0
+# --- Testing ---
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

@@ -42,8 +42,8 @@ stages:
     deps:
     - path: icu_train.py
       hash: md5
-      md5: 682673f2e5e7db785dfa1d4094c4d96a
-      size: 23566
+      md5: d3008639109ed7ddfeb8cbf72fbcbf9e
+      size: 41309
     - path: mimic_processed/X_test.npy
       hash: md5
       md5: 33badb1540c478e6f990f10c2d1b1bd3
@@ -67,18 +67,21 @@ stages:
     outs:
     - path: metrics/metrics.json
       hash: md5
-      md5: e953a33d52b281a4fbba57067fa9694b
-      size: 810
-    - path: models/lightgbm_model.joblib
-      hash: md5
-      md5: da610f08cc7d3b818449e170e9dcde3a
-      size: 903636
-    - path: models/logistic_regression.joblib
-      hash: md5
-      md5: 9947279a25d62463edfcf7e2ad3fa47a
-      size: 1647
+      md5: cfa428ef785b17a24ea0ede623871418
+      size: 893
     - path: plots/
       hash: md5
-      md5: b6768b44cf8057ff554776e4dcbcfea0.dir
-      size: 1050184
-      nfiles: 14
+      md5: 71cc9e64473d7ad7880dfcfce3a9642c.dir
+      size: 1080913
+      nfiles: 7
+  promote:
+    cmd: python promote_model.py
+    deps:
+    - path: metrics/metrics.json
+      hash: md5
+      md5: cfa428ef785b17a24ea0ede623871418
+      size: 893
+    - path: promote_model.py
+      hash: md5
+      md5: da275a86407b175cc2751c373c170b37
+      size: 4949

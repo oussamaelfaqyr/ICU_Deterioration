@@ -1,0 +1,58 @@
+name: CD — Deploy on Release
+
+on:
+  push:
+    tags:
+      - "v*"          # triggers on v1.0, v2.3.1, etc.
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/icu-api
+
+jobs:
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull tagged image
+        run: docker pull ${{ env.IMAGE_NAME }}:${{ github.sha }} || docker pull ${{ env.IMAGE_NAME }}:latest
+
+      # ── Swap in the new image and restart the api service ─────────────────
+      # Replace this step with your actual deploy command (e.g. SSH, kubectl, etc.)
+      - name: Deploy via Docker Compose
+        run: |
+          echo "IMAGE_TAG=${{ github.sha }}" >> .env
+          docker compose up -d --no-build api
+        # If deploying to a remote host, use:
+        # ssh ${{ secrets.DEPLOY_HOST }} "cd /opt/icu && docker compose up -d --no-build api"
+
+      # ── Health check with retries ──────────────────────────────────────────
+      - name: Health check
+        run: |
+          for i in $(seq 1 10); do
+            STATUS=$(curl -sf http://localhost:8000/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || echo "")
+            if [ "$STATUS" = "ok" ]; then
+              echo "Health check passed on attempt $i"
+              exit 0
+            fi
+            echo "Attempt $i: not ready yet, retrying in 5s..."
+            sleep 5
+          done
+          echo "Health check failed after 10 attempts"
+          exit 1
+
+      - name: Notify success
+        run: echo "Deployment of ${{ github.ref_name }} complete."

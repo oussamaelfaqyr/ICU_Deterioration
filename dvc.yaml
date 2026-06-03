@@ -25,9 +25,13 @@ stages:
       - mimic_processed/y_test.npy
       - mimic_processed/feature_names_final.csv
     outs:
-      - models/logistic_regression.joblib
-      - models/lightgbm_model.joblib
       - plots/
     metrics:
       - metrics/metrics.json:
           cache: false
+
+  promote:
+    cmd: python promote_model.py
+    deps:
+      - promote_model.py
+      - metrics/metrics.json
