@@ -17,6 +17,8 @@ Run:
 import os
 import time
 import json
+import subprocess
+import socket
 import requests
 import numpy as np
 import pandas as pd
@@ -181,6 +183,44 @@ if "sim_history"    not in st.session_state: st.session_state.sim_history    = [
 if "sim_running"    not in st.session_state: st.session_state.sim_running    = False
 if "sim_index"      not in st.session_state: st.session_state.sim_index      = 0
 if "pred_history"   not in st.session_state: st.session_state.pred_history   = []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BACKEND AUTO-LAUNCHER
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_resource
+def ensure_api_running():
+    # Only try auto-launch if we are running locally (localhost)
+    if "localhost" not in API_URL and "127.0.0.1" not in API_URL:
+        return
+        
+    try:
+        r = requests.get(f"{API_URL}/health", timeout=1)
+        if r.status_code == 200:
+            return  # API is already running
+    except requests.exceptions.RequestException:
+        pass
+    
+    # Start the API via subprocess
+    import sys
+    # We must run it from the root directory of the project
+    root_dir = Path(__file__).parent.parent
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "api:app", "--port", "8000"],
+        cwd=str(root_dir)
+    )
+    
+    # Wait up to 10 seconds for it to boot
+    for _ in range(10):
+        time.sleep(1)
+        try:
+            r = requests.get(f"{API_URL}/health", timeout=1)
+            if r.status_code == 200:
+                break
+        except requests.exceptions.RequestException:
+            pass
+
+# Run the auto-launcher right away
+ensure_api_running()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
