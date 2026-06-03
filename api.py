@@ -406,6 +406,7 @@ def model_info():
         "champion_version": state.model_version,
         "model_type": state.model_type,
         "n_features": len(state.feature_names) if state.feature_names else None,
+        "feature_names": state.feature_names,
         "threshold_high": THRESHOLD_HIGH,
         "threshold_medium": THRESHOLD_MEDIUM,
         "shap_available": state.explainer is not None,
@@ -448,6 +449,51 @@ def predict(req: PatientFeatures):
         )
     except Exception as e:
         log.exception("Prediction error")
+        raise HTTPException(500, str(e))
+
+
+class PreprocessedRequest(BaseModel):
+    features_array: list[float]
+    stay_id: Optional[Any] = None
+
+@app.post("/predict/preprocessed", response_model=PredictionResponse)
+def predict_preprocessed(req: PreprocessedRequest):
+    if state.model is None:
+        raise HTTPException(503, "Model not loaded")
+    t0 = time.perf_counter()
+    try:
+        X_pp = np.array([req.features_array], dtype=np.float32)
+        if hasattr(state.model, "predict_proba"):
+            probs = state.model.predict_proba(X_pp)[:, 1]
+        else:
+            probs = state.model.predict(X_pp)
+            
+        score = float(probs[0])
+        level = _risk_level(score)
+        contribs = _explain(X_pp[:1])
+
+        elapsed = time.perf_counter() - t0
+        _prom_latency.observe(elapsed)
+        _prom_score.observe(score)
+        _prom_predictions.labels(
+            risk_level=level,
+            model_version=str(state.model_version),
+        ).inc()
+        _log_prediction(X_pp, score, level)
+
+        return PredictionResponse(
+            stay_id=req.stay_id,
+            risk_score=round(score, 4),
+            alert=score >= state.threshold,
+            risk_level=level,
+            top_features=contribs,
+            model_version=str(state.model_version),
+            model_type=state.model_type,
+            threshold=state.threshold,
+        )
+    except Exception as e:
+        log.exception("Prediction error")
+        raise HTTPException(500, str(e))
         raise HTTPException(500, str(e))
 
 

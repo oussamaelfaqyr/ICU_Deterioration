@@ -38,6 +38,25 @@ services:
       - icu-net
     restart: unless-stopped
 
+  # ── 1.5 Streamlit Dashboard ──────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: icu-dashboard
+    command: streamlit run dashboard/app.py --server.port=8501 --server.address=0.0.0.0
+    ports:
+      - "8501:8501"
+    environment:
+      - API_URL=http://api:8000
+    volumes:
+      - ./dashboard:/app/dashboard:ro
+    depends_on:
+      - api
+    networks:
+      - icu-net
+    restart: unless-stopped
+
   # ── 2. MLflow tracking server ────────────────────────────────────────────────
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.13.0
