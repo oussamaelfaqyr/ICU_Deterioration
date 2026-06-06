@@ -10,9 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential gcc g++ libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY requirements-api.txt .
 RUN pip install --upgrade pip \
- && pip install --prefix=/install --no-cache-dir -r requirements.txt
+ && pip install --prefix=/install --no-cache-dir -r requirements-api.txt
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 2: runtime image

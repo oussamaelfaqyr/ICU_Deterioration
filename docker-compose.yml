@@ -1,4 +1,4 @@
-version: "3.9"
+
 
 # Shared network so every service can reach each other by hostname
 networks:
@@ -59,7 +59,9 @@ services:
 
   # ── 2. MLflow tracking server ────────────────────────────────────────────────
   mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.13.0
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: icu-mlflow
     ports:
       - "5000:5000"
@@ -70,9 +72,10 @@ services:
         --host 0.0.0.0
         --port 5000
     volumes:
-      - mlflow-db:/mlflow
+      - ./mlruns:/mlflow/mlruns
+      - ./mlflow.db:/mlflow/mlflow.db
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/')"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -126,7 +129,7 @@ services:
     ports:
       - "8080:8080"
     environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__WEBSERVER__SECRET_KEY: "icu-airflow-secret-change-me"
@@ -142,7 +145,7 @@ services:
     command: >
       bash -c "
         airflow db migrate &&
-        airflow users create --username admin --password admin
+        airflow users create --username admin --password admin \
           --firstname ICU --lastname Admin --role Admin --email admin@icu.local &&
         airflow webserver --port 8080 &
         airflow scheduler
