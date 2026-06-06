@@ -1,20 +1,27 @@
 """
 ICU Deterioration Predictor — Professional Standalone Dashboard
 ================================================================
-Full 4-page dashboard that runs entirely without a backend API.
-Uses model_bundle.json for predictions and parquet files for simulation.
+Model-agnostic dashboard. Loads `streamlit_artifacts/inference_pipeline.joblib`
+(produced by export_streamlit_bundle.py after every training run) so the
+dashboard automatically serves whichever model won training — LightGBM,
+XGBoost, Random Forest, or Logistic Regression — without any code changes.
+
 Deploy directly to Streamlit Community Cloud.
 """
 
 import json
 import time
+import warnings
 import numpy as np
 import pandas as pd
+import joblib
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
 from pathlib import Path
 from datetime import datetime
+
+warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -27,7 +34,7 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GLOBAL STYLING (identical to dashboard/app.py)
+# GLOBAL STYLING
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -77,7 +84,7 @@ section[data-testid="stSidebar"] .stRadio label { font-size: 0.9rem; color: #a0a
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
-ARTIFACTS_DIR = Path("data preparation/mimic_processed/model_artifacts")
+ARTIFACTS_DIR = Path("streamlit_artifacts")
 COLOR_HIGH    = "#fc8181"
 COLOR_MEDIUM  = "#fbbf24"
 COLOR_LOW     = "#34d399"
@@ -100,23 +107,39 @@ for key, default in [("sim_history", []), ("sim_index", 0), ("pred_history", [])
         st.session_state[key] = default
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODEL LOADING
+# MODEL LOADING  — model-agnostic via inference_pipeline.joblib
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_resource
-def load_bundle():
-    path = ARTIFACTS_DIR / "model_bundle.json"
-    with open(path) as f:
-        b = json.load(f)
-    weights = np.array(b["model"]["weights"])
-    bias    = b["model"]["bias"]
-    mean    = np.array(b["standardizer"]["mean"])
-    scale   = np.array(b["standardizer"]["scale"])
-    return b, weights, bias, mean, scale
+def load_inference_pipeline():
+    """Load the complete inference pipeline exported by export_streamlit_bundle.py."""
+    pipe_path = ARTIFACTS_DIR / "inference_pipeline.joblib"
+    if not pipe_path.exists():
+        st.error(
+            f"❌ `{pipe_path}` not found.\n\n"
+            "Run `python export_streamlit_bundle.py` locally (or trigger the CI/CD "
+            "pipeline) to generate Streamlit artifacts."
+        )
+        st.stop()
+    return joblib.load(pipe_path)
+
+
+@st.cache_resource
+def load_preprocessor_meta():
+    """Load raw preprocessing metadata for feature-name mapping and defaults."""
+    meta_path = ARTIFACTS_DIR / "preprocessing_pipeline.joblib"
+    if meta_path.exists():
+        return joblib.load(meta_path)
+    return None
+
 
 @st.cache_data
 def load_metrics():
-    with open(ARTIFACTS_DIR / "metrics.json") as f:
-        return json.load(f)
+    path = ARTIFACTS_DIR / "metrics.json"
+    if path.exists():
+        with open(path) as f:
+            return json.load(f)
+    return {}
+
 
 @st.cache_data
 def load_test_predictions():
@@ -125,32 +148,112 @@ def load_test_predictions():
         return pd.read_parquet(path)
     return None
 
-bundle, W, BIAS, MEAN, SCALE = load_bundle()
-FEATURE_NAMES = bundle["feature_names"]
-N_FEATURES    = len(FEATURE_NAMES)
+
+# Eager load at startup (triggers st.stop on missing artifacts)
+PIPELINE    = load_inference_pipeline()
+PROC_META   = load_preprocessor_meta()
+
+# Derive feature names and model type from the loaded pipeline
+_model_step = PIPELINE.named_steps.get("model") or PIPELINE.steps[-1][1]
+MODEL_TYPE  = type(_model_step).__name__
+
+# Feature names from the preprocessor step inside the pipeline (if sklearn Pipeline)
+try:
+    _prep_step = PIPELINE.named_steps.get("preprocessor")
+    FEATURE_NAMES = list(_prep_step.get_feature_names_out())
+except Exception:
+    # Fallback: use metadata from preprocessing_pipeline.joblib
+    FEATURE_NAMES = list(PROC_META["feature_names"]) if PROC_META else []
+
+N_FEATURES = len(FEATURE_NAMES)
+
+# Training-set means for filling in missing manual inputs
+if PROC_META is not None:
+    try:
+        _ct = PROC_META["preprocessor"]
+        # Reconstruct feature means from the ColumnTransformer's StandardScaler steps
+        _means = []
+        for name, trans, cols in _ct.transformers_:
+            if hasattr(trans, "named_steps") and hasattr(trans.named_steps.get("scaler", None), "mean_"):
+                _means.extend(trans.named_steps["scaler"].mean_)
+            elif name == "binary" or name == "indicators":
+                _means.extend([0.0] * (len(cols) if hasattr(cols, "__len__") else 1))
+        FEATURE_MEANS = np.array(_means) if _means else np.zeros(N_FEATURES)
+    except Exception:
+        FEATURE_MEANS = np.zeros(N_FEATURES)
+else:
+    FEATURE_MEANS = np.zeros(N_FEATURES)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PREDICTION ENGINE
+# PREDICTION ENGINE  — model-agnostic
 # ─────────────────────────────────────────────────────────────────────────────
-def sigmoid(x): return 1.0 / (1.0 + np.exp(-np.clip(x, -500, 500)))
+def predict_from_dict(features_dict: dict) -> float:
+    """
+    Build a single-row DataFrame from the user's inputs (filling missing
+    features with training means), then run it through the full
+    inference pipeline.
+    """
+    row = {f: float(FEATURE_MEANS[i]) for i, f in enumerate(FEATURE_NAMES)}
+    row.update({k: float(v) for k, v in features_dict.items() if k in row})
+    df = pd.DataFrame([row])
+    try:
+        proba = PIPELINE.predict_proba(df)[0, 1]
+    except AttributeError:
+        proba = float(PIPELINE.predict(df)[0])
+    return float(proba)
 
-def predict(features_dict: dict) -> float:
-    x = np.array([features_dict.get(f, MEAN[i]) for i, f in enumerate(FEATURE_NAMES)], dtype=np.float64)
-    x_scaled = (x - MEAN) / np.where(SCALE == 0, 1, SCALE)
-    return float(sigmoid(np.dot(x_scaled, W) + BIAS))
 
 def risk_level(score: float) -> str:
     if score >= TH_HIGH: return "HIGH"
     if score >= TH_MED:  return "MEDIUM"
     return "LOW"
 
-def top_features(features_dict: dict, n=10):
-    """Approximate feature contributions via weight × standardized value."""
-    x = np.array([features_dict.get(f, MEAN[i]) for i, f in enumerate(FEATURE_NAMES)], dtype=np.float64)
-    x_scaled = (x - MEAN) / np.where(SCALE == 0, 1, SCALE)
-    contribs  = x_scaled * W
-    idx = np.argsort(np.abs(contribs))[::-1][:n]
-    return [{"feature": FEATURE_NAMES[i], "contribution": float(contribs[i])} for i in idx]
+
+def top_features(features_dict: dict, n: int = 10) -> list:
+    """
+    Compute approximate feature contributions.
+    For linear models we use weight × standardised value.
+    For tree models we use the model's feature_importances_ weighted by input value deviation.
+    """
+    row = {f: float(FEATURE_MEANS[i]) for i, f in enumerate(FEATURE_NAMES)}
+    row.update({k: float(v) for k, v in features_dict.items() if k in row})
+    x = np.array([row[f] for f in FEATURE_NAMES], dtype=np.float64)
+
+    try:
+        base_model = _model_step
+        # Linear models
+        if hasattr(base_model, "coef_"):
+            W = base_model.coef_.ravel()
+            try:
+                _prep = PIPELINE.named_steps["preprocessor"]
+                _scs  = [t for name, t, _ in _prep.transformers_ if hasattr(t, "named_steps")]
+                scale = np.ones(N_FEATURES)
+                mean  = np.zeros(N_FEATURES)
+                offset = 0
+                for name, trans, cols in _prep.transformers_:
+                    nc = len(cols) if hasattr(cols, "__len__") else 1
+                    if hasattr(trans, "named_steps"):
+                        sc = trans.named_steps.get("scaler")
+                        if sc and hasattr(sc, "mean_"):
+                            mean[offset:offset+nc]  = sc.mean_
+                            scale[offset:offset+nc] = sc.scale_
+                    offset += nc
+                x_scaled = (x - mean) / np.where(scale == 0, 1, scale)
+                contribs  = x_scaled * W
+            except Exception:
+                contribs = x * W
+        # Tree models
+        elif hasattr(base_model, "feature_importances_"):
+            fi = base_model.feature_importances_
+            contribs = fi * np.abs(x - FEATURE_MEANS)
+        else:
+            contribs = np.zeros(N_FEATURES)
+
+        idx = np.argsort(np.abs(contribs))[::-1][:n]
+        return [{"feature": FEATURE_NAMES[i], "contribution": float(contribs[i])} for i in idx]
+    except Exception:
+        return []
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CHART HELPERS
@@ -178,6 +281,7 @@ def gauge_chart(score: float) -> go.Figure:
     fig.update_layout(height=280, **PLOTLY_THEME)
     return fig
 
+
 def contrib_bar(contribs: list) -> go.Figure:
     names  = [c["feature"] for c in contribs]
     values = [c["contribution"] for c in contribs]
@@ -187,8 +291,37 @@ def contrib_bar(contribs: list) -> go.Figure:
         marker_color=colors,
         text=[f"{v:+.4f}" for v in values], textposition="outside",
     ))
-    fig.update_layout(title="Feature Contributions (weight × standardised value)", xaxis_title="Contribution to Risk", height=320, **PLOTLY_THEME)
+    fig.update_layout(
+        title="Feature Contributions (weight × standardised value)",
+        xaxis_title="Contribution to Risk",
+        height=320, **PLOTLY_THEME,
+    )
     return fig
+
+
+def feature_importance_chart() -> go.Figure:
+    """Model-agnostic importance chart."""
+    base = _model_step
+    if hasattr(base, "feature_importances_"):
+        importance = base.feature_importances_
+        title = f"Top 20 Feature Importances ({MODEL_TYPE})"
+        colors = [COLOR_BLUE] * N_FEATURES
+    elif hasattr(base, "coef_"):
+        importance = np.abs(base.coef_.ravel())
+        title = "Top 20 Feature Importances (|weight|) — Red = raises risk, Green = lowers risk"
+        colors = [COLOR_HIGH if base.coef_.ravel()[i] > 0 else COLOR_LOW for i in range(N_FEATURES)]
+    else:
+        return go.Figure()
+
+    idx   = np.argsort(importance)[-20:]
+    names = [FEATURE_NAMES[i] for i in idx]
+    vals  = [importance[i] for i in idx]
+    clrs  = [colors[i] for i in idx]
+
+    fig = go.Figure(go.Bar(x=vals, y=names, orientation="h", marker_color=clrs))
+    fig.update_layout(title=title, xaxis_title="Importance", height=520, **PLOTLY_THEME)
+    return fig
+
 
 def timeline_chart(history: list) -> go.Figure:
     df = pd.DataFrame(history)
@@ -208,6 +341,7 @@ def timeline_chart(history: list) -> go.Figure:
     fig.update_layout(title="Real-time Risk Score Stream", xaxis_title="Patient", yaxis_title="Risk %", height=320, **PLOTLY_THEME)
     return fig
 
+
 def donut_chart(history: list) -> go.Figure:
     df = pd.DataFrame(history)
     counts = df["level"].value_counts().reindex(["HIGH", "MEDIUM", "LOW"], fill_value=0)
@@ -219,6 +353,7 @@ def donut_chart(history: list) -> go.Figure:
     fig.update_layout(title="Risk Level Distribution", height=280, showlegend=False, **PLOTLY_THEME)
     return fig
 
+
 def calibration_chart(cal_data: list) -> go.Figure:
     df  = pd.DataFrame(cal_data)
     mid = (df["bin_start"] + df["bin_end"]) / 2
@@ -229,15 +364,6 @@ def calibration_chart(cal_data: list) -> go.Figure:
     fig.update_layout(title="Calibration Curve (Test Set)", xaxis_title="Mean Predicted Probability", yaxis_title="Observed Event Rate", height=320, **PLOTLY_THEME)
     return fig
 
-def feature_importance_chart() -> go.Figure:
-    importance = np.abs(W)
-    idx = np.argsort(importance)[-20:]
-    names = [FEATURE_NAMES[i] for i in idx]
-    vals  = [importance[i] for i in idx]
-    colors = [COLOR_HIGH if W[i] > 0 else COLOR_LOW for i in idx]
-    fig = go.Figure(go.Bar(x=vals, y=names, orientation="h", marker_color=colors))
-    fig.update_layout(title="Top 20 Feature Importances (|weight|) — Red = raises risk, Green = lowers risk", xaxis_title="|Weight|", height=520, **PLOTLY_THEME)
-    return fig
 
 def stat_card(col, label, value, sub):
     with col:
@@ -249,6 +375,7 @@ def stat_card(col, label, value, sub):
             </div>
         """, unsafe_allow_html=True)
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SIDEBAR
 # ─────────────────────────────────────────────────────────────────────────────
@@ -259,7 +386,7 @@ with st.sidebar:
     st.markdown(f"""
         <div style='margin-top:0.8rem; padding:0.8rem; background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.3); border-radius:10px;'>
             <span style='color:#34d399; font-weight:600;'>🟢 Model Loaded</span><br/>
-            <span style='color:#718096; font-size:0.78rem;'>Logistic Regression Baseline<br/>{N_FEATURES} features · Serverless</span>
+            <span style='color:#718096; font-size:0.78rem;'>{MODEL_TYPE}<br/>{N_FEATURES} features · Serverless</span>
         </div>
     """, unsafe_allow_html=True)
     st.markdown("---")
@@ -281,12 +408,12 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 col_h1, col_h2 = st.columns([3, 1])
 with col_h1:
-    st.markdown("""
+    st.markdown(f"""
         <h1 style='margin:0; color:#e2e8f0; font-size:1.8rem; font-weight:700;'>
             ICU Deterioration Risk Predictor
         </h1>
         <p style='margin:0.2rem 0 0 0; color:#718096; font-size:0.9rem;'>
-            Real-time AI monitoring · Logistic Regression Baseline · 152 Clinical Features
+            Real-time AI monitoring · <b>{MODEL_TYPE}</b> · {N_FEATURES} Clinical Features
         </p>
     """, unsafe_allow_html=True)
 with col_h2:
@@ -307,15 +434,14 @@ if nav == "📊 Overview":
     st.markdown('<div class="section-header"><h2>📊 System Overview</h2></div>', unsafe_allow_html=True)
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    stat_card(c1, "Model Type",      "Log. Reg.",               "Baseline classifier")
-    stat_card(c2, "Features",        str(N_FEATURES),            "input dimensions")
-    stat_card(c3, "Test AUROC",      f"{test_m.get('auroc',0):.3f}", "discrimination")
-    stat_card(c4, "Test Recall",     f"{test_m.get('recall',0)*100:.1f}%", "sensitivity")
-    stat_card(c5, "HIGH Threshold",  f"{TH_HIGH*100:.0f}%",     "alert trigger")
+    stat_card(c1, "Model Type",      MODEL_TYPE,                           "champion classifier")
+    stat_card(c2, "Features",        str(N_FEATURES),                      "input dimensions")
+    stat_card(c3, "Test AUROC",      f"{test_m.get('auroc', test_m.get('auc_roc', 0)):.3f}", "discrimination")
+    stat_card(c4, "Test Recall",     f"{test_m.get('recall', 0)*100:.1f}%",  "sensitivity")
+    stat_card(c5, "HIGH Threshold",  f"{TH_HIGH*100:.0f}%",                "alert trigger")
 
     st.markdown("<br/>", unsafe_allow_html=True)
 
-    # Session history
     hist = st.session_state.pred_history + st.session_state.sim_history
     if hist:
         col_l, col_r = st.columns([2, 1])
@@ -343,7 +469,6 @@ if nav == "📊 Overview":
             </div>
         """, unsafe_allow_html=True)
 
-    # Feature importance chart
     st.markdown("<br/>", unsafe_allow_html=True)
     st.plotly_chart(feature_importance_chart(), use_container_width=True)
 
@@ -353,10 +478,10 @@ if nav == "📊 Overview":
 # ─────────────────────────────────────────────────────────────────────────────
 elif nav == "🔬 Manual Prediction":
     st.markdown('<div class="section-header"><h2>🔬 Manual Patient Risk Assessment</h2></div>', unsafe_allow_html=True)
-    st.markdown("""
+    st.markdown(f"""
         <div class="info-box">
             Adjust the key clinical vitals below. All remaining model features are filled
-            with their training-set mean values. The Logistic Regression model scores
+            with their training-set mean values. The <b>{MODEL_TYPE}</b> model scores
             this patient instantly — no internet connection to a backend required.
         </div><br/>
     """, unsafe_allow_html=True)
@@ -417,15 +542,9 @@ elif nav == "🔬 Manual Prediction":
     run_btn = st.button("🚀 Score Patient", type="primary")
 
     if run_btn:
-        # Build full feature dict using training means as defaults
-        full_features = {f: float(MEAN[i]) for i, f in enumerate(FEATURE_NAMES)}
-        for k, v in user_inputs.items():
-            if k in full_features:
-                full_features[k] = float(v)
-
-        score = predict(full_features)
-        level = risk_level(score)
-        contribs = top_features(full_features)
+        score    = predict_from_dict(user_inputs)
+        level    = risk_level(score)
+        contribs = top_features(user_inputs)
 
         risk_css  = f"risk-{level.lower()}"
         badge_css = f"badge-{level.lower()}"
@@ -444,14 +563,15 @@ elif nav == "🔬 Manual Prediction":
                     <div style="color:#a0aec0; font-size:0.85rem;">
                         Alert: {"Yes ⚠️" if alert else "No ✓"} &nbsp;|&nbsp;
                         Threshold: {TH_HIGH*100:.0f}% &nbsp;|&nbsp;
-                        Model: Logistic Regression
+                        Model: {MODEL_TYPE}
                     </div>
                 </div>
             """, unsafe_allow_html=True)
         with col_g:
             st.plotly_chart(gauge_chart(score), use_container_width=True)
 
-        st.plotly_chart(contrib_bar(contribs), use_container_width=True)
+        if contribs:
+            st.plotly_chart(contrib_bar(contribs), use_container_width=True)
 
         st.session_state.pred_history.append({
             "ts": datetime.now().strftime("%H:%M:%S"),
@@ -468,15 +588,15 @@ elif nav == "⚡ Live Simulation":
     st.markdown("""
         <div class="info-box">
             This streams <b>real held-out test patients</b> from the pre-computed
-            <code>test_predictions.parquet</code> file through the model one-by-one,
-            simulating a live ICU monitoring feed. Ground-truth labels are shown
-            alongside model predictions.
+            <code>streamlit_artifacts/test_predictions.parquet</code> file through
+            the model one-by-one, simulating a live ICU monitoring feed.
+            Ground-truth labels are shown alongside model predictions.
         </div><br/>
     """, unsafe_allow_html=True)
 
     test_df = load_test_predictions()
     if test_df is None:
-        st.error("Test predictions file not found. Make sure `data preparation/mimic_processed/model_artifacts/test_predictions.parquet` is in the repository.")
+        st.error("Test predictions file not found. Trigger the CI/CD pipeline to generate `streamlit_artifacts/test_predictions.parquet`.")
         st.stop()
 
     n_total = len(test_df)
@@ -507,12 +627,12 @@ elif nav == "⚡ Live Simulation":
         if idx_start >= n_total:
             st.warning(f"All {n_total} test patients processed. Click Reset to start over.")
         else:
-            prog = st.progress(0, text="Streaming patients…")
+            prog   = st.progress(0, text="Streaming patients…")
             status = st.empty()
 
             for i, idx in enumerate(range(idx_start, idx_end)):
                 row   = test_df.iloc[idx]
-                score = float(row[score_col]) if score_col else predict({})
+                score = float(row[score_col]) if score_col else 0.5
                 label = int(row[label_col]) if label_col else None
                 level = risk_level(score)
                 alert = score >= TH_HIGH
@@ -555,7 +675,6 @@ elif nav == "⚡ Live Simulation":
         stat_card(c4, "LOW Risk",         str(n_low),              f"{n_low/len(history)*100:.0f}%")
         stat_card(c5, "Avg Risk Score",   f"{avg*100:.1f}%",       "mean across stream")
 
-        # Confusion / performance breakdown
         labelled = [h for h in history if h.get("label") is not None]
         if labelled:
             st.markdown("<br/>##### 🎯 Prediction vs Ground Truth", unsafe_allow_html=True)
@@ -598,9 +717,9 @@ elif nav == "⚡ Live Simulation":
 elif nav == "📈 Model Performance":
     metrics = load_metrics()
     st.markdown('<div class="section-header"><h2>📈 Model Performance</h2></div>', unsafe_allow_html=True)
-    st.markdown("""
+    st.markdown(f"""
         <div class="info-box">
-            Held-out evaluation metrics for the Logistic Regression baseline model.
+            Held-out evaluation metrics for the <b>{MODEL_TYPE}</b> champion model.
             AUROC measures overall discrimination; Recall (sensitivity) is critical in ICU settings
             to minimise missed deterioration events.
         </div><br/>
@@ -609,19 +728,22 @@ elif nav == "📈 Model Performance":
     split = st.radio("Dataset split:", ["test", "validation", "train"], horizontal=True)
     m = metrics.get(split, {})
 
+    auroc_key = "auroc" if "auroc" in m else "auc_roc"
+    auprc_key = "auprc" if "auprc" in m else "pr_auc"
+
     c1, c2, c3, c4 = st.columns(4)
-    stat_card(c1, "AUROC",    f"{m.get('auroc',0):.4f}",              "discrimination")
-    stat_card(c2, "Recall",   f"{m.get('recall',0)*100:.1f}%",        "sensitivity")
-    stat_card(c3, "Precision",f"{m.get('precision',0)*100:.1f}%",     "PPV")
-    stat_card(c4, "F1 Score", f"{m.get('f1',0)*100:.1f}%",            "harmonic mean")
+    stat_card(c1, "AUROC",    f"{m.get(auroc_key, 0):.4f}",              "discrimination")
+    stat_card(c2, "Recall",   f"{m.get('recall', 0)*100:.1f}%",          "sensitivity")
+    stat_card(c3, "Precision",f"{m.get('precision', 0)*100:.1f}%",       "PPV")
+    stat_card(c4, "F1 Score", f"{m.get('f1', 0)*100:.1f}%",              "harmonic mean")
 
     st.markdown("<br/>", unsafe_allow_html=True)
 
     c5, c6, c7, c8 = st.columns(4)
-    stat_card(c5, "Accuracy",    f"{m.get('accuracy',0)*100:.1f}%",    "overall correct")
-    stat_card(c6, "Specificity", f"{m.get('specificity',0)*100:.1f}%", "true neg rate")
-    stat_card(c7, "AUPRC",       f"{m.get('auprc',0):.4f}",            "precision-recall AUC")
-    stat_card(c8, "Brier Score", f"{m.get('brier',0):.4f}",            "calibration error")
+    stat_card(c5, "Accuracy",    f"{m.get('accuracy', 0)*100:.1f}%",    "overall correct")
+    stat_card(c6, "Specificity", f"{m.get('specificity', 0)*100:.1f}%", "true neg rate")
+    stat_card(c7, "AUPRC",       f"{m.get(auprc_key, 0):.4f}",          "precision-recall AUC")
+    stat_card(c8, "Brier Score", f"{m.get('brier', 0):.4f}",            "calibration error")
 
     st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -631,6 +753,6 @@ elif nav == "📈 Model Performance":
         if cal:
             st.plotly_chart(calibration_chart(cal), use_container_width=True)
         else:
-            st.info("Calibration curve not available for training split.")
+            st.info("Calibration curve not available for this split.")
     with col_b:
         st.plotly_chart(feature_importance_chart(), use_container_width=True)

@@ -1,0 +1,193 @@
+name: "ML Pipeline — Train, Export & Deploy to Streamlit"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TRIGGERS
+# ─────────────────────────────────────────────────────────────────────────────
+on:
+  # Manual trigger from the GitHub Actions tab
+  workflow_dispatch:
+
+  # Weekly automatic retraining — every Sunday at 02:00 UTC
+  schedule:
+    - cron: "0 2 * * 0"
+
+  # Safety: skip runs triggered by the bot's own artifact commits
+  push:
+    branches: [main]
+    # Only run when actual source code or data changes — NOT on artifact pushes
+    paths-ignore:
+      - "streamlit_artifacts/**"
+      - "metrics/**"
+      - "plots/**"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PERMISSIONS
+# ─────────────────────────────────────────────────────────────────────────────
+permissions:
+  contents: write   # needed to push artifacts back to main
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENVIRONMENT
+# ─────────────────────────────────────────────────────────────────────────────
+env:
+  MLFLOW_TRACKING_URI: sqlite:///mlflow.db
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 1 — Lint & Unit Tests (fast gate, runs in parallel with nothing)
+  # ───────────────────────────────────────────────────────────────────────────
+  test:
+    name: "1 · Lint & Tests"
+    runs-on: ubuntu-latest
+    # Do NOT run if the commit was made by the bot itself (prevents loops)
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install test dependencies
+        run: pip install -r requirements-api.txt
+
+      - name: Run unit tests
+        run: pytest tests/ -v --tb=short
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 2 — Train, Evaluate & Export Streamlit Artifacts
+  # ───────────────────────────────────────────────────────────────────────────
+  train-and-export:
+    name: "2 · Train → Evaluate → Export"
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.actor != 'github-actions[bot]'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so DVC can diff correctly
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install all ML dependencies
+        run: pip install -r requirements-api.txt
+
+      # ── DVC: pull cached data from remote (if configured) ──────────────────
+      # If you have a DVC remote (S3, GCS, etc.) uncomment the next two steps:
+      # - name: Configure DVC remote credentials
+      #   run: dvc remote modify myremote access_key_id ${{ secrets.AWS_KEY }}
+      # - name: Pull DVC-tracked data
+      #   run: dvc pull --no-run-cache
+
+      # ── Run the full DVC pipeline ──────────────────────────────────────────
+      # This executes: preprocess → train → promote → export_streamlit
+      # Only stages whose dependencies changed will re-run (DVC caching).
+      - name: Run DVC pipeline (dvc repro)
+        run: |
+          dvc repro --no-commit 2>&1 | tee dvc_repro.log
+          echo "DVC pipeline finished."
+
+      # ── Capture metrics for the GitHub Actions job summary ─────────────────
+      - name: Print model metrics
+        if: always()
+        run: |
+          echo "### 📊 Training Metrics" >> $GITHUB_STEP_SUMMARY
+          if [ -f metrics/metrics.json ]; then
+            echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+            cat metrics/metrics.json >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -f streamlit_artifacts/metrics.json ]; then
+            echo "### 🏆 Champion Model Metrics" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+            cat streamlit_artifacts/metrics.json >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # ── Verify artifacts were created ──────────────────────────────────────
+      - name: Verify Streamlit artifacts
+        run: |
+          echo "--- Streamlit artifacts ---"
+          ls -lh streamlit_artifacts/
+          test -f streamlit_artifacts/inference_pipeline.joblib || (echo "❌ inference_pipeline.joblib missing!" && exit 1)
+          test -f streamlit_artifacts/metrics.json              || (echo "❌ metrics.json missing!" && exit 1)
+          test -f streamlit_artifacts/test_predictions.parquet  || (echo "❌ test_predictions.parquet missing!" && exit 1)
+          echo "✅ All required artifacts present."
+
+      # ── Commit and push only the lightweight artifacts back to main ─────────
+      # We commit:  streamlit_artifacts/   metrics/   plots/
+      # We do NOT commit: mlruns/  optuna.db  models/*.pkl  mimic_processed/
+      - name: Commit & push artifacts to main
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Stage only lightweight output files
+          git add streamlit_artifacts/
+          git add metrics/ || true
+          git add plots/   || true
+
+          # Only commit if there are actual changes
+          if git diff --cached --quiet; then
+            echo "No artifact changes to commit. Streamlit Cloud is already up to date."
+          else
+            TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
+            git commit -m "ci: update Streamlit artifacts [${TIMESTAMP}] [skip ci]
+
+          Automated artifact update from GitHub Actions.
+          Triggered by: ${{ github.event_name }}
+          Run: ${{ github.run_number }}
+          SHA: ${{ github.sha }}"
+
+            git push origin main
+            echo "✅ Artifacts pushed. Streamlit Cloud will redeploy automatically."
+          fi
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # JOB 3 — Docker Image Build & Push to GHCR (API service, not Streamlit)
+  # ───────────────────────────────────────────────────────────────────────────
+  docker-push:
+    name: "3 · Build & Push API Docker Image"
+    runs-on: ubuntu-latest
+    needs: train-and-export
+    # Only push the API image on main pushes (not scheduled runs)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'github-actions[bot]'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & push API image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/icu-api:latest
+            ghcr.io/${{ github.repository_owner }}/icu-api:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
