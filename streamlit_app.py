@@ -20,6 +20,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from pathlib import Path
 from datetime import datetime
+import preprocessor_helper  # registered for joblib unpickling
 
 warnings.filterwarnings("ignore")
 
@@ -28,7 +29,7 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="ICU Deterioration Predictor",
-    page_icon="🏥",
+    page_icon="⚕",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -395,7 +396,7 @@ with st.sidebar:
 
     nav = st.radio(
         "Navigation",
-        [":bar_chart: Overview", ":microscope: Manual Prediction", ":zap: Live Simulation", ":chart_with_upwards_trend: Model Performance"],
+        ["Overview", "Manual Prediction", "Live Simulation", "Model Performance"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -429,7 +430,7 @@ st.markdown("---")
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE: OVERVIEW
 # ─────────────────────────────────────────────────────────────────────────────
-if nav == ":bar_chart: Overview":
+if nav == "Overview":
     metrics = load_metrics()
     test_m  = metrics.get("test", {})
 
@@ -478,7 +479,7 @@ if nav == ":bar_chart: Overview":
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE: MANUAL PREDICTION
 # ─────────────────────────────────────────────────────────────────────────────
-elif nav == ":microscope: Manual Prediction":
+elif nav == "Manual Prediction":
     st.markdown('<div class="section-header"><i class="fa-solid fa-heart-pulse" style="color:#63b3ed;"></i><h2>Manual Patient Risk Assessment</h2></div>', unsafe_allow_html=True)
     st.markdown(f"""
         <div class="info-box">
@@ -541,7 +542,7 @@ elif nav == ":microscope: Manual Prediction":
                         user_inputs[key] = st.number_input(label, int(mn), int(mx), int(default), step=step, key=f"inp_{key}")
 
     st.markdown("<br/>", unsafe_allow_html=True)
-    run_btn = st.button("🚀 Score Patient", type="primary")
+    run_btn = st.button("Score Patient", type="primary")
 
     if run_btn:
         score    = predict_from_dict(user_inputs)
@@ -587,13 +588,13 @@ elif nav == ":microscope: Manual Prediction":
             "ts": datetime.now().strftime("%H:%M:%S"),
             "score": score, "level": level, "source": "manual",
         })
-        st.success("✅ Prediction logged to session history.")
+        st.success("Prediction logged to session history.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE: LIVE SIMULATION
 # ─────────────────────────────────────────────────────────────────────────────
-elif nav == ":zap: Live Simulation":
+elif nav == "Live Simulation":
     st.markdown('<div class="section-header"><i class="fa-solid fa-bolt" style="color:#63b3ed;"></i><h2>Live Test-Data Simulation</h2></div>', unsafe_allow_html=True)
     st.markdown("""
         <div class="info-box">
@@ -620,10 +621,10 @@ elif nav == ":zap: Live Simulation":
         delay_ms = st.number_input("Delay per patient (ms)", 0, 2000, 100, key="delay_ms")
     with col_c3:
         st.markdown("<br/>", unsafe_allow_html=True)
-        start = st.button("▶ Start Streaming", type="primary", use_container_width=True)
+        start = st.button("Start Streaming", type="primary", use_container_width=True)
     with col_c4:
         st.markdown("<br/>", unsafe_allow_html=True)
-        reset = st.button("⏹ Reset", use_container_width=True)
+        reset = st.button("Reset", use_container_width=True)
 
     if reset:
         st.session_state.sim_history = []
@@ -716,7 +717,7 @@ elif nav == ":zap: Live Simulation":
     else:
         st.markdown("""
             <div class="info-box">
-                Click <b>▶ Start Streaming</b> to begin processing real test patients through the model.
+                Click <b>Start Streaming</b> to begin processing real test patients through the model.
             </div>
         """, unsafe_allow_html=True)
 
@@ -724,7 +725,7 @@ elif nav == ":zap: Live Simulation":
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE: MODEL PERFORMANCE
 # ─────────────────────────────────────────────────────────────────────────────
-elif nav == ":chart_with_upwards_trend: Model Performance":
+elif nav == "Model Performance":
     metrics = load_metrics()
     st.markdown('<div class="section-header"><i class="fa-solid fa-chart-line" style="color:#63b3ed;"></i><h2>Model Performance</h2></div>', unsafe_allow_html=True)
     st.markdown(f"""

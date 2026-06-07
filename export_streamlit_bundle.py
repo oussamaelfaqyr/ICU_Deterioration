@@ -47,8 +47,11 @@ def main():
     proc_pipe_path = Path("mimic_processed/preprocessing_pipeline.joblib")
     if proc_pipe_path.exists():
         pipe_dict = joblib.load(proc_pipe_path)
+        from preprocessor_helper import FeatureSelector
         inference_pipeline = Pipeline([
             ("preprocessor", pipe_dict["preprocessor"]),
+            ("variance_threshold", pipe_dict["variance_threshold"]),
+            ("selector", FeatureSelector(pipe_dict["keep_idx"])),
             ("model", model)
         ])
         joblib.dump(inference_pipeline, out_dir / "inference_pipeline.joblib")
