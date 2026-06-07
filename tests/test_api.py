@@ -8,6 +8,10 @@ import json
 import sys
 import types
 from pathlib import Path
+
+# Add project root to sys.path so 'api' can be imported during tests
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from unittest.mock import MagicMock, patch
 
 import numpy as np

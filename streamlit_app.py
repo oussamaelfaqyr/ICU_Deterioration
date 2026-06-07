@@ -15,6 +15,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import joblib
+import shap
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
@@ -188,6 +189,29 @@ else:
     FEATURE_MEANS = np.zeros(N_FEATURES)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SHAP EXPLAINER INITIALIZATION
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_resource
+def load_explainer():
+    base = _model_step
+    try:
+        df_bg = pd.DataFrame([FEATURE_MEANS], columns=FEATURE_NAMES)
+        if "preprocessor" in PIPELINE.named_steps:
+            X_bg = PIPELINE.named_steps["preprocessor"].transform(df_bg)
+        else:
+            X_bg = df_bg
+            
+        if hasattr(base, "coef_"):
+            return shap.LinearExplainer(base, X_bg)
+        elif hasattr(base, "feature_importances_"):
+            return shap.TreeExplainer(base)
+    except Exception as e:
+        warnings.warn(f"SHAP initialization failed: {e}")
+    return None
+
+EXPLAINER = load_explainer()
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PREDICTION ENGINE  — model-agnostic
 # ─────────────────────────────────────────────────────────────────────────────
 def predict_from_dict(features_dict: dict) -> float:
@@ -214,22 +238,41 @@ def risk_level(score: float) -> str:
 
 def top_features(features_dict: dict, n: int = 10) -> list:
     """
-    Compute approximate feature contributions.
-    For linear models we use weight × standardised value.
-    For tree models we use the model's feature_importances_ weighted by input value deviation.
+    Compute exact feature contributions using SHAP. Falls back to approximation if SHAP fails.
     """
     row = {f: float(FEATURE_MEANS[i]) for i, f in enumerate(FEATURE_NAMES)}
     row.update({k: float(v) for k, v in features_dict.items() if k in row})
-    x = np.array([row[f] for f in FEATURE_NAMES], dtype=np.float64)
+    df = pd.DataFrame([row])
+    
+    if EXPLAINER is not None:
+        try:
+            if "preprocessor" in PIPELINE.named_steps:
+                X_pre = PIPELINE.named_steps["preprocessor"].transform(df)
+            else:
+                X_pre = df
+            
+            shap_vals = EXPLAINER.shap_values(X_pre)
+            # Handle multiclass or different SHAP output formats
+            if isinstance(shap_vals, list):
+                shap_vals = shap_vals[1] if len(shap_vals) > 1 else shap_vals[0]
+            
+            contribs = shap_vals[0]
+            if hasattr(contribs, "values"):  # for Explanation objects
+                contribs = contribs.values
+            
+            idx = np.argsort(np.abs(contribs))[::-1][:n]
+            return [{"feature": FEATURE_NAMES[i], "contribution": float(contribs[i])} for i in idx]
+        except Exception as e:
+            warnings.warn(f"SHAP computation failed: {e}")
 
+    # --- Fallback: Approximate feature contributions ---
+    x = np.array([row[f] for f in FEATURE_NAMES], dtype=np.float64)
     try:
         base_model = _model_step
-        # Linear models
         if hasattr(base_model, "coef_"):
             W = base_model.coef_.ravel()
             try:
                 _prep = PIPELINE.named_steps["preprocessor"]
-                _scs  = [t for name, t, _ in _prep.transformers_ if hasattr(t, "named_steps")]
                 scale = np.ones(N_FEATURES)
                 mean  = np.zeros(N_FEATURES)
                 offset = 0
@@ -245,7 +288,6 @@ def top_features(features_dict: dict, n: int = 10) -> list:
                 contribs  = x_scaled * W
             except Exception:
                 contribs = x * W
-        # Tree models
         elif hasattr(base_model, "feature_importances_"):
             fi = base_model.feature_importances_
             contribs = fi * np.abs(x - FEATURE_MEANS)
@@ -295,8 +337,8 @@ def contrib_bar(contribs: list) -> go.Figure:
         text=[f"{v:+.4f}" for v in values], textposition="outside",
     ))
     fig.update_layout(
-        title="Feature Contributions (weight × standardised value)",
-        xaxis_title="Contribution to Risk",
+        title="Top Driving Features (SHAP Values)",
+        xaxis_title="SHAP Value (Impact on Risk)",
         height=320, **PLOTLY_THEME,
     )
     return fig
