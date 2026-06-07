@@ -62,7 +62,7 @@ def main():
         joblib.dump(model, out_dir / "inference_pipeline.joblib")
     
     # Copy metrics
-    metrics_path = Path("metrics/metrics.json")
+    metrics_path = Path("data preparation/mimic_processed/model_artifacts/metrics.json")
     if metrics_path.exists():
         shutil.copy(metrics_path, out_dir / "metrics.json")
         
