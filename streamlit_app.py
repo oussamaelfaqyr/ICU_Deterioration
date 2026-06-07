@@ -39,6 +39,7 @@ st.set_page_config(
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css');
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .stApp { background: linear-gradient(135deg, #0a0e1a 0%, #0d1117 50%, #0a0e1a 100%); }
 .main .block-container { padding-top: 1.5rem; padding-bottom: 2rem; max-width: 1400px; }
@@ -63,7 +64,8 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .risk-medium { background: linear-gradient(135deg, rgba(245,158,11,0.2), rgba(180,83,9,0.1)); border: 2px solid rgba(245,158,11,0.6); }
 .risk-low    { background: linear-gradient(135deg, rgba(16,185,129,0.2), rgba(5,150,105,0.1)); border: 2px solid rgba(16,185,129,0.6); }
 
-.section-header { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid rgba(99,179,237,0.2); }
+.section-header { display: flex; align-items: center; gap: 0.8rem; margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid rgba(99,179,237,0.2); }
+.section-header i { font-size: 1.25rem; }
 .section-header h2 { color: #e2e8f0; font-size: 1.2rem; font-weight: 600; margin: 0; }
 
 .info-box { background: rgba(99,179,237,0.08); border: 1px solid rgba(99,179,237,0.25); border-radius: 10px; padding: 1rem 1.2rem; font-size: 0.88rem; color: #a0aec0; line-height: 1.6; }
@@ -380,26 +382,26 @@ def stat_card(col, label, value, sub):
 # SIDEBAR
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## 🏥 ICU Predictor")
+    st.markdown("## <i class='fa-solid fa-hospital-user' style='color:#63b3ed; margin-right:8px;'></i> ICU Predictor", unsafe_allow_html=True)
     st.markdown("---")
-    st.markdown('<span class="cloud-badge">☁️ Cloud Edition · Serverless</span>', unsafe_allow_html=True)
+    st.markdown('<span class="cloud-badge"><i class="fa-solid fa-cloud" style="margin-right:6px;"></i> Cloud Edition · Serverless</span>', unsafe_allow_html=True)
     st.markdown(f"""
         <div style='margin-top:0.8rem; padding:0.8rem; background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.3); border-radius:10px;'>
-            <span style='color:#34d399; font-weight:600;'>🟢 Model Loaded</span><br/>
-            <span style='color:#718096; font-size:0.78rem;'>{MODEL_TYPE}<br/>{N_FEATURES} features · Serverless</span>
+            <span style='color:#34d399; font-weight:600;'><i class='fa-solid fa-circle-check' style='margin-right:6px;'></i> Model Loaded</span><br/>
+            <span style='color:#718096; font-size:0.78rem; margin-left: 20px;'>{MODEL_TYPE}<br/><span style='margin-left: 20px;'>{N_FEATURES} features · Serverless</span></span>
         </div>
     """, unsafe_allow_html=True)
     st.markdown("---")
 
     nav = st.radio(
         "Navigation",
-        ["📊 Overview", "🔬 Manual Prediction", "⚡ Live Simulation", "📈 Model Performance"],
+        [":bar_chart: Overview", ":microscope: Manual Prediction", ":zap: Live Simulation", ":chart_with_upwards_trend: Model Performance"],
         label_visibility="collapsed",
     )
     st.markdown("---")
     st.markdown(
         "<div style='text-align:center; color:#4a5568; font-size:0.75rem;'>"
-        "ICU Deterioration ML System<br/>MLOps Stack · Serverless Cloud</div>",
+        "<i class='fa-solid fa-server' style='margin-right:4px;'></i> ICU Deterioration ML System<br/>MLOps Stack · Serverless Cloud</div>",
         unsafe_allow_html=True
     )
 
@@ -427,11 +429,11 @@ st.markdown("---")
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE: OVERVIEW
 # ─────────────────────────────────────────────────────────────────────────────
-if nav == "📊 Overview":
+if nav == ":bar_chart: Overview":
     metrics = load_metrics()
     test_m  = metrics.get("test", {})
 
-    st.markdown('<div class="section-header"><h2>📊 System Overview</h2></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header"><i class="fa-solid fa-chart-pie" style="color:#63b3ed;"></i><h2>System Overview</h2></div>', unsafe_allow_html=True)
 
     c1, c2, c3, c4, c5 = st.columns(5)
     stat_card(c1, "Model Type",      MODEL_TYPE,                           "champion classifier")
@@ -463,7 +465,7 @@ if nav == "📊 Overview":
     else:
         st.markdown("""
             <div class="info-box">
-                📌 No predictions yet in this session.<br/>
+                <i class="fa-solid fa-circle-info" style="color:#63b3ed; margin-right:6px;"></i> No predictions yet in this session.<br/>
                 Use <b>Manual Prediction</b> to score a single patient, or run the
                 <b>Live Simulation</b> to stream real test-set patients through the model.
             </div>
@@ -476,8 +478,8 @@ if nav == "📊 Overview":
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE: MANUAL PREDICTION
 # ─────────────────────────────────────────────────────────────────────────────
-elif nav == "🔬 Manual Prediction":
-    st.markdown('<div class="section-header"><h2>🔬 Manual Patient Risk Assessment</h2></div>', unsafe_allow_html=True)
+elif nav == ":microscope: Manual Prediction":
+    st.markdown('<div class="section-header"><i class="fa-solid fa-heart-pulse" style="color:#63b3ed;"></i><h2>Manual Patient Risk Assessment</h2></div>', unsafe_allow_html=True)
     st.markdown(f"""
         <div class="info-box">
             Adjust the key clinical vitals below. All remaining model features are filled
@@ -548,20 +550,28 @@ elif nav == "🔬 Manual Prediction":
 
         risk_css  = f"risk-{level.lower()}"
         badge_css = f"badge-{level.lower()}"
-        icon      = "🔴" if level == "HIGH" else "🟡" if level == "MEDIUM" else "🟢"
+        
+        if level == "HIGH":
+            icon_html = '<i class="fa-solid fa-triangle-exclamation" style="color:#fc8181; font-size:3.5rem; margin-bottom: 0.5rem; display: inline-block;"></i>'
+        elif level == "MEDIUM":
+            icon_html = '<i class="fa-solid fa-circle-exclamation" style="color:#fbbf24; font-size:3.5rem; margin-bottom: 0.5rem; display: inline-block;"></i>'
+        else:
+            icon_html = '<i class="fa-solid fa-circle-check" style="color:#34d399; font-size:3.5rem; margin-bottom: 0.5rem; display: inline-block;"></i>'
+            
         alert     = score >= TH_HIGH
+        alert_html = 'Yes <i class="fa-solid fa-triangle-exclamation" style="color:#fc8181; margin-left:4px;"></i>' if alert else 'No <i class="fa-solid fa-circle-check" style="color:#34d399; margin-left:4px;"></i>'
 
         col_r, col_g = st.columns([1, 1])
         with col_r:
             st.markdown(f"""
                 <div class="risk-banner {risk_css}">
-                    <div style="font-size:3rem;">{icon}</div>
+                    <div>{icon_html}</div>
                     <span class="{badge_css}">{level} RISK</span>
                     <div style="font-size:3.5rem; font-weight:800; color:#e2e8f0; margin:0.5rem 0;">
                         {score*100:.1f}%
                     </div>
                     <div style="color:#a0aec0; font-size:0.85rem;">
-                        Alert: {"Yes ⚠️" if alert else "No ✓"} &nbsp;|&nbsp;
+                        Alert: {alert_html} &nbsp;|&nbsp;
                         Threshold: {TH_HIGH*100:.0f}% &nbsp;|&nbsp;
                         Model: {MODEL_TYPE}
                     </div>
@@ -583,8 +593,8 @@ elif nav == "🔬 Manual Prediction":
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE: LIVE SIMULATION
 # ─────────────────────────────────────────────────────────────────────────────
-elif nav == "⚡ Live Simulation":
-    st.markdown('<div class="section-header"><h2>⚡ Live Test-Data Simulation</h2></div>', unsafe_allow_html=True)
+elif nav == ":zap: Live Simulation":
+    st.markdown('<div class="section-header"><i class="fa-solid fa-bolt" style="color:#63b3ed;"></i><h2>Live Test-Data Simulation</h2></div>', unsafe_allow_html=True)
     st.markdown("""
         <div class="info-box">
             This streams <b>real held-out test patients</b> from the pre-computed
@@ -677,7 +687,7 @@ elif nav == "⚡ Live Simulation":
 
         labelled = [h for h in history if h.get("label") is not None]
         if labelled:
-            st.markdown("<br/>##### 🎯 Prediction vs Ground Truth", unsafe_allow_html=True)
+            st.markdown("<br/>##### <i class='fa-solid fa-bullseye' style='color:#63b3ed; margin-right:6px;'></i> Prediction vs Ground Truth", unsafe_allow_html=True)
             df_c = pd.DataFrame(labelled)
             df_c["pred_pos"] = (df_c["score"] >= TH_HIGH).astype(int)
             tp = int(((df_c["pred_pos"] == 1) & (df_c["label"] == 1)).sum())
@@ -695,7 +705,7 @@ elif nav == "⚡ Live Simulation":
             stat_card(cc3, "F1 Score",               f"{f1*100:.1f}%",   "harmonic mean")
             stat_card(cc4, "Accuracy",               f"{acc*100:.1f}%",  "correct calls")
 
-        st.markdown("<br/>##### 📋 Prediction Log", unsafe_allow_html=True)
+        st.markdown("<br/>##### <i class='fa-solid fa-list' style='color:#63b3ed; margin-right:6px;'></i> Prediction Log", unsafe_allow_html=True)
         df_show = pd.DataFrame(history[::-1]).rename(columns={
             "ts": "Time", "score": "Risk Score", "level": "Risk Level",
             "alert": "Alert", "label": "True Label", "idx": "Patient #"
@@ -714,9 +724,9 @@ elif nav == "⚡ Live Simulation":
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE: MODEL PERFORMANCE
 # ─────────────────────────────────────────────────────────────────────────────
-elif nav == "📈 Model Performance":
+elif nav == ":chart_with_upwards_trend: Model Performance":
     metrics = load_metrics()
-    st.markdown('<div class="section-header"><h2>📈 Model Performance</h2></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header"><i class="fa-solid fa-chart-line" style="color:#63b3ed;"></i><h2>Model Performance</h2></div>', unsafe_allow_html=True)
     st.markdown(f"""
         <div class="info-box">
             Held-out evaluation metrics for the <b>{MODEL_TYPE}</b> champion model.

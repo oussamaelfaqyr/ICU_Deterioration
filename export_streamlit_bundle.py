@@ -44,7 +44,7 @@ def main():
             model = mlflow.pyfunc.load_model(model_uri)
 
     # Create inference_pipeline.joblib
-    proc_pipe_path = Path("data preparation/mimic_processed/preprocessing_pipeline.joblib")
+    proc_pipe_path = Path("mimic_processed/preprocessing_pipeline.joblib")
     if proc_pipe_path.exists():
         pipe_dict = joblib.load(proc_pipe_path)
         inference_pipeline = Pipeline([
@@ -64,8 +64,8 @@ def main():
         shutil.copy(metrics_path, out_dir / "metrics.json")
         
     # Test predictions
-    X_test_path = Path("data preparation/mimic_processed/X_test.npy")
-    y_test_path = Path("data preparation/mimic_processed/y_test.npy")
+    X_test_path = Path("mimic_processed/X_test.npy")
+    y_test_path = Path("mimic_processed/y_test.npy")
     if X_test_path.exists() and y_test_path.exists():
         X_test = np.load(X_test_path)
         y_test = np.load(y_test_path)
