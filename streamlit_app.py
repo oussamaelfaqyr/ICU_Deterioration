@@ -161,21 +161,31 @@ PROC_META   = load_preprocessor_meta()
 _model_step = PIPELINE.named_steps.get("model") or PIPELINE.steps[-1][1]
 MODEL_TYPE  = type(_model_step).__name__
 
-# Feature names from the preprocessor step inside the pipeline (if sklearn Pipeline)
-try:
-    _prep_step = PIPELINE.named_steps.get("preprocessor")
-    FEATURE_NAMES = list(_prep_step.get_feature_names_out())
-except Exception:
-    # Fallback: use metadata from preprocessing_pipeline.joblib
-    FEATURE_NAMES = list(PROC_META["feature_names"]) if PROC_META else []
-
+# Feature names from preprocessing metadata (these are the 98 post-selector names)
+FEATURE_NAMES = list(PROC_META["feature_names"]) if PROC_META else []
 N_FEATURES = len(FEATURE_NAMES)
+
+# ── Detect pipeline input requirements ────────────────────────────────────────
+# The pipeline may have a ColumnTransformer that needs ALL raw columns (118),
+# not just the 98 post-transformation feature names.
+try:
+    _ct_step = PIPELINE.named_steps.get("preprocessor")
+    if hasattr(_ct_step, "transformers_"):
+        RAW_COLUMNS = []
+        for _, _, cols in _ct_step.transformers_:
+            RAW_COLUMNS.extend(list(cols) if hasattr(cols, "__iter__") and not isinstance(cols, str) else [cols])
+        _PIPELINE_NEEDS_RAW = True
+    else:
+        RAW_COLUMNS = list(FEATURE_NAMES)
+        _PIPELINE_NEEDS_RAW = False
+except Exception:
+    RAW_COLUMNS = list(FEATURE_NAMES)
+    _PIPELINE_NEEDS_RAW = False
 
 # Training-set means for filling in missing manual inputs
 if PROC_META is not None:
     try:
         _ct = PROC_META["preprocessor"]
-        # Reconstruct feature means from the ColumnTransformer's StandardScaler steps
         _means = []
         for name, trans, cols in _ct.transformers_:
             if hasattr(trans, "named_steps") and hasattr(trans.named_steps.get("scaler", None), "mean_"):
@@ -193,18 +203,16 @@ else:
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_resource
 def load_explainer():
+    """Create a SHAP explainer directly on the model step (not the full pipeline)."""
     base = _model_step
     try:
-        df_bg = pd.DataFrame([FEATURE_MEANS], columns=FEATURE_NAMES)
-        if "preprocessor" in PIPELINE.named_steps:
-            X_bg = PIPELINE.named_steps["preprocessor"].transform(df_bg)
-        else:
-            X_bg = df_bg
-            
-        if hasattr(base, "coef_"):
-            return shap.LinearExplainer(base, X_bg)
-        elif hasattr(base, "feature_importances_"):
+        if hasattr(base, "feature_importances_"):
+            # Tree models: LightGBM, XGBoost, RandomForest
             return shap.TreeExplainer(base)
+        elif hasattr(base, "coef_"):
+            # Linear models: LogisticRegression
+            bg = np.zeros((1, base.coef_.shape[1]))
+            return shap.LinearExplainer(base, bg)
     except Exception as e:
         warnings.warn(f"SHAP initialization failed: {e}")
     return None
@@ -212,17 +220,37 @@ def load_explainer():
 EXPLAINER = load_explainer()
 
 # ─────────────────────────────────────────────────────────────────────────────
+# HELPER: Build input & preprocess
+# ─────────────────────────────────────────────────────────────────────────────
+def _build_raw_input(features_dict: dict) -> pd.DataFrame:
+    """Build a single-row DataFrame with ALL columns the pipeline expects."""
+    if _PIPELINE_NEEDS_RAW:
+        # Full pipeline: ColumnTransformer needs 118 raw columns
+        row = {c: 0.0 for c in RAW_COLUMNS}
+    else:
+        # Simple pipeline: only needs the 98 post-transformation features
+        row = {f: float(FEATURE_MEANS[i]) for i, f in enumerate(FEATURE_NAMES)}
+    row.update({k: float(v) for k, v in features_dict.items() if k in row})
+    return pd.DataFrame([row])
+
+
+def _preprocess_for_shap(df: pd.DataFrame) -> np.ndarray:
+    """Transform a DataFrame through ALL pipeline steps EXCEPT the model."""
+    X = df
+    for step_name, step_transformer in PIPELINE.steps[:-1]:
+        X = step_transformer.transform(X)
+    return X if isinstance(X, np.ndarray) else np.array(X)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PREDICTION ENGINE  — model-agnostic
 # ─────────────────────────────────────────────────────────────────────────────
 def predict_from_dict(features_dict: dict) -> float:
     """
     Build a single-row DataFrame from the user's inputs (filling missing
-    features with training means), then run it through the full
-    inference pipeline.
+    features with defaults), then run it through the full inference pipeline.
     """
-    row = {f: float(FEATURE_MEANS[i]) for i, f in enumerate(FEATURE_NAMES)}
-    row.update({k: float(v) for k, v in features_dict.items() if k in row})
-    df = pd.DataFrame([row])
+    df = _build_raw_input(features_dict)
     try:
         proba = PIPELINE.predict_proba(df)[0, 1]
     except AttributeError:
@@ -238,34 +266,32 @@ def risk_level(score: float) -> str:
 
 def top_features(features_dict: dict, n: int = 10) -> list:
     """
-    Compute exact feature contributions using SHAP. Falls back to approximation if SHAP fails.
+    Compute feature contributions using SHAP. Falls back to weight-based
+    approximation if SHAP is unavailable.
     """
-    row = {f: float(FEATURE_MEANS[i]) for i, f in enumerate(FEATURE_NAMES)}
-    row.update({k: float(v) for k, v in features_dict.items() if k in row})
-    df = pd.DataFrame([row])
-    
+    df = _build_raw_input(features_dict)
+
     if EXPLAINER is not None:
         try:
-            if "preprocessor" in PIPELINE.named_steps:
-                X_pre = PIPELINE.named_steps["preprocessor"].transform(df)
-            else:
-                X_pre = df
-            
+            X_pre = _preprocess_for_shap(df)
+
             shap_vals = EXPLAINER.shap_values(X_pre)
             # Handle multiclass or different SHAP output formats
             if isinstance(shap_vals, list):
                 shap_vals = shap_vals[1] if len(shap_vals) > 1 else shap_vals[0]
-            
+
             contribs = shap_vals[0]
             if hasattr(contribs, "values"):  # for Explanation objects
                 contribs = contribs.values
-            
+
             idx = np.argsort(np.abs(contribs))[::-1][:n]
             return [{"feature": FEATURE_NAMES[i], "contribution": float(contribs[i])} for i in idx]
         except Exception as e:
             warnings.warn(f"SHAP computation failed: {e}")
 
     # --- Fallback: Approximate feature contributions ---
+    row = {f: float(FEATURE_MEANS[i]) for i, f in enumerate(FEATURE_NAMES)}
+    row.update({k: float(v) for k, v in features_dict.items() if k in row})
     x = np.array([row[f] for f in FEATURE_NAMES], dtype=np.float64)
     try:
         base_model = _model_step
@@ -531,6 +557,7 @@ elif nav == "Manual Prediction":
         </div><br/>
     """, unsafe_allow_html=True)
 
+    # ── Basic clinical features (always shown) ──────────────────────────────────
     CLINICAL_FEATURES = {
         "Demographics": {
             "age":            ("Age (years)",             18, 100, 65,    1),
@@ -550,6 +577,7 @@ elif nav == "Manual Prediction":
         },
         "Temperature & GCS": {
             "temp_c_max":     ("Max Temp (°C)",           32.0, 42.0, 37.0, 0.1),
+            "gcs_total_mean": ("Mean GCS Total",           3, 15, 12, 1),
             "gcs_eye_min":    ("Min GCS Eye",               1, 4,     3,   1),
             "gcs_motor_min":  ("Min GCS Motor",             1, 6,     5,   1),
             "gcs_verb_min":   ("Min GCS Verbal",            1, 5,     4,   1),
@@ -569,9 +597,126 @@ elif nav == "Manual Prediction":
             "total_urine_ml":       ("Total Urine (mL)",    0.0, 10000.0, 1816.0, 10.0),
             "fluid_balance_ml":     ("Fluid Balance (mL)", -5000.0, 10000.0, 985.0, 10.0),
             "vaso_flag":            ("Vasopressors Used",   0, 1, 0, 1),
+            "vaso_max_rate":        ("Max Vasopressor Rate", 0.0, 5.0, 0.0, 0.01),
         },
     }
 
+    # ── Advanced features (shown on toggle) ───────────────────────────────────
+    ADVANCED_FEATURES = {
+        "Vital Signs — First / Last / Mean / Std / Delta": {
+            "hr_first":   ("HR First (bpm)",      20, 250, 80, 1),
+            "hr_last":    ("HR Last (bpm)",        20, 250, 80, 1),
+            "hr_mean":    ("HR Mean (bpm)",        20, 250, 78, 1),
+            "hr_std":     ("HR Std Dev",           0.0, 60.0, 5.0, 0.1),
+            "hr_delta":   ("HR Delta (last−first)",-100, 100, 0, 1),
+            "sbp_max":    ("Max SBP (mmHg)",       40, 300, 140, 1),
+            "sbp_min":    ("Min SBP (mmHg)",       40, 250, 110, 1),
+            "sbp_first":  ("SBP First (mmHg)",     40, 300, 120, 1),
+            "sbp_last":   ("SBP Last (mmHg)",      40, 300, 120, 1),
+            "sbp_mean":   ("SBP Mean (mmHg)",      40, 300, 120, 1),
+            "sbp_std":    ("SBP Std Dev",          0.0, 80.0, 8.0, 0.1),
+            "sbp_delta":  ("SBP Delta",           -150, 150, 0, 1),
+            "map_max":    ("Max MAP (mmHg)",       20, 200, 90, 1),
+            "map_first":  ("MAP First (mmHg)",     20, 200, 78, 1),
+            "map_last":   ("MAP Last (mmHg)",      20, 200, 78, 1),
+            "map_mean":   ("MAP Mean (mmHg)",      20, 200, 78, 1),
+            "map_std":    ("MAP Std Dev",          0.0, 50.0, 5.0, 0.1),
+            "map_delta":  ("MAP Delta",           -100, 100, 0, 1),
+            "rr_min":     ("Min Resp Rate",         2, 60, 12, 1),
+            "rr_first":   ("RR First (/min)",       2, 60, 16, 1),
+            "rr_last":    ("RR Last (/min)",        2, 60, 16, 1),
+            "rr_mean":    ("RR Mean (/min)",        2, 60, 16, 1),
+            "rr_std":     ("RR Std Dev",           0.0, 30.0, 2.0, 0.1),
+            "rr_delta":   ("RR Delta",            -30, 30, 0, 1),
+            "spo2_max":   ("Max SpO2 (%)",         70, 100, 99, 1),
+            "spo2_first": ("SpO2 First (%)",       50, 100, 97, 1),
+            "spo2_last":  ("SpO2 Last (%)",        50, 100, 97, 1),
+            "spo2_mean":  ("SpO2 Mean (%)",        50, 100, 97, 1),
+            "spo2_std":   ("SpO2 Std Dev",         0.0, 20.0, 1.5, 0.1),
+            "spo2_delta": ("SpO2 Delta",          -30, 30, 0, 1),
+        },
+        "FiO2 & PEEP (Ventilator)": {
+            "fio2_min":   ("Min FiO2",             0.0, 100.0, 0.21, 0.01),
+            "fio2_first": ("FiO2 First",           0.0, 100.0, 0.21, 0.01),
+            "fio2_last":  ("FiO2 Last",            0.0, 100.0, 0.21, 0.01),
+            "fio2_mean":  ("FiO2 Mean",            0.0, 100.0, 0.21, 0.01),
+            "fio2_std":   ("FiO2 Std Dev",         0.0, 50.0, 0.0, 0.01),
+            "fio2_delta": ("FiO2 Delta",          -1.0, 1.0, 0.0, 0.01),
+            "peep_max":   ("Max PEEP (cmH2O)",     0, 40, 5, 1),
+            "peep_min":   ("Min PEEP (cmH2O)",     0, 40, 5, 1),
+            "peep_first": ("PEEP First",           0, 40, 5, 1),
+            "peep_last":  ("PEEP Last",            0, 40, 5, 1),
+            "peep_mean":  ("PEEP Mean",            0.0, 40.0, 5.0, 0.1),
+            "peep_std":   ("PEEP Std Dev",         0.0, 20.0, 0.0, 0.1),
+            "peep_delta": ("PEEP Delta",          -20, 20, 0, 1),
+        },
+        "Extended Labs": {
+            "lab_bicarbonate": ("Bicarbonate (mEq/L)", 5.0, 45.0, 24.0, 0.1),
+            "lab_bilirubin":   ("Bilirubin (mg/dL)",   0.0, 40.0, 0.8, 0.1),
+            "lab_inr":         ("INR",                 0.5, 15.0, 1.1, 0.1),
+            "lab_paco2":       ("PaCO2 (mmHg)",       10.0, 120.0, 40.0, 1.0),
+            "lab_pao2":        ("PaO2 (mmHg)",        20.0, 600.0, 90.0, 1.0),
+            "lab_platelets":   ("Platelets (K/uL)",    0.0, 1000.0, 220.0, 1.0),
+        },
+        "ICU Unit Type": {
+            "unit_micu":      ("MICU (Medical ICU)",         0, 1, 0, 1),
+            "unit_sicu":      ("SICU (Surgical ICU)",        0, 1, 0, 1),
+            "unit_ccu":       ("CCU (Cardiac Care)",         0, 1, 0, 1),
+            "unit_cvicu":     ("CVICU (Cardiovascular ICU)", 0, 1, 0, 1),
+            "unit_nicu":      ("NICU (Neuro ICU)",           0, 1, 0, 1),
+            "unit_tsicu":     ("TSICU (Trauma/Surg ICU)",    0, 1, 0, 1),
+            "unit_micu_sicu": ("MICU/SICU (Combined)",       0, 1, 0, 1),
+        },
+        "Fluids & Urine (Extended)": {
+            "total_input_ml":   ("Total Input (mL)",        0.0, 20000.0, 2500.0, 10.0),
+            "urine_n_obs":      ("Urine Observations",      0, 100, 10, 1),
+            "urine_rate_ml_hr": ("Urine Rate (mL/hr)",      0.0, 500.0, 60.0, 1.0),
+        },
+        "Observation Counts": {
+            "hr_n_obs":   ("HR Observations",    0, 500, 20, 1),
+            "sbp_n_obs":  ("SBP Observations",   0, 500, 15, 1),
+            "map_n_obs":  ("MAP Observations",   0, 500, 15, 1),
+            "rr_n_obs":   ("RR Observations",    0, 500, 15, 1),
+            "spo2_n_obs": ("SpO2 Observations",  0, 500, 20, 1),
+            "fio2_n_obs": ("FiO2 Observations",  0, 500, 5,  1),
+            "peep_n_obs": ("PEEP Observations",  0, 500, 5,  1),
+        },
+        "Admission Info": {
+            "admit_hour":    ("Admission Hour (0–23)",   0, 23, 12, 1),
+            "admit_weekday": ("Admission Weekday (0=Mon)", 0, 6, 3, 1),
+            "admit_month":   ("Admission Month (1–12)",  1, 12, 6, 1),
+            "gender_male":   ("Gender Male",             0, 1, 0, 1),
+            "emergency_flag":("Emergency Admission",     0, 1, 0, 1),
+            "fluid_negative_flag": ("Fluid Negative",    0, 1, 0, 1),
+            "oliguria_flag":       ("Oliguria Flag",     0, 1, 0, 1),
+        },
+        "Missingness Flags": {
+            "sbp_was_missing":             ("SBP Missing",              0, 1, 0, 1),
+            "rr_was_missing":              ("RR Missing",               0, 1, 0, 1),
+            "fio2_was_missing":            ("FiO2 Missing",             0, 1, 0, 1),
+            "hr_was_missing":              ("HR Missing",               0, 1, 0, 1),
+            "map_was_missing":             ("MAP Missing",              0, 1, 0, 1),
+            "peep_was_missing":            ("PEEP Missing",             0, 1, 0, 1),
+            "spo2_was_missing":            ("SpO2 Missing",             0, 1, 0, 1),
+            "lab_lactate_was_missing":     ("Lactate Missing",          0, 1, 0, 1),
+            "lab_creatinine_was_missing":  ("Creatinine Missing",       0, 1, 0, 1),
+            "lab_bun_was_missing":         ("BUN Missing",              0, 1, 0, 1),
+            "lab_wbc_was_missing":         ("WBC Missing",              0, 1, 0, 1),
+            "lab_hemoglobin_was_missing":  ("Hemoglobin Missing",       0, 1, 0, 1),
+            "lab_platelets_was_missing":   ("Platelets Missing",        0, 1, 0, 1),
+            "lab_sodium_was_missing":      ("Sodium Missing",           0, 1, 0, 1),
+            "lab_potassium_was_missing":   ("Potassium Missing",        0, 1, 0, 1),
+            "lab_bicarbonate_was_missing": ("Bicarbonate Missing",      0, 1, 0, 1),
+            "lab_bilirubin_was_missing":   ("Bilirubin Missing",        0, 1, 0, 1),
+            "lab_inr_was_missing":         ("INR Missing",              0, 1, 0, 1),
+            "lab_ph_was_missing":          ("pH Missing",               0, 1, 0, 1),
+            "lab_pao2_was_missing":        ("PaO2 Missing",             0, 1, 0, 1),
+            "lab_paco2_was_missing":       ("PaCO2 Missing",            0, 1, 0, 1),
+            "lab_glucose_was_missing":     ("Glucose Missing",          0, 1, 0, 1),
+        },
+    }
+
+    # ── Render basic features ─────────────────────────────────────────────────
     user_inputs = {}
     for section, feats in CLINICAL_FEATURES.items():
         with st.expander(f"**{section}**", expanded=(section in ["Cardiovascular", "Respiratory"])):
@@ -582,6 +727,32 @@ elif nav == "Manual Prediction":
                         user_inputs[key] = st.number_input(label, float(mn), float(mx), float(default), step=step, key=f"inp_{key}")
                     else:
                         user_inputs[key] = st.number_input(label, int(mn), int(mx), int(default), step=step, key=f"inp_{key}")
+
+    # ── Toggle for advanced features ──────────────────────────────────────────
+    st.markdown("<br/>", unsafe_allow_html=True)
+    show_advanced = st.toggle(
+        "Show Advanced Features (all 118 model inputs)",
+        value=False,
+        help="Enable to see and adjust ALL features the model uses, including vital sign statistics, observation counts, ICU unit type, admission info, and missingness flags."
+    )
+
+    if show_advanced:
+        st.markdown("""
+            <div class="info-box" style="margin-bottom:1rem;">
+                <i class="fa-solid fa-flask" style="color:#63b3ed; margin-right:6px;"></i>
+                <b>Advanced Mode</b> — These are the remaining model features that are normally
+                auto-filled with default values. Adjust them for fine-grained control over the prediction.
+            </div>
+        """, unsafe_allow_html=True)
+        for section, feats in ADVANCED_FEATURES.items():
+            with st.expander(f"**{section}**", expanded=False):
+                cols = st.columns(min(len(feats), 4))
+                for idx, (key, (label, mn, mx, default, step)) in enumerate(feats.items()):
+                    with cols[idx % len(cols)]:
+                        if isinstance(step, float):
+                            user_inputs[key] = st.number_input(label, float(mn), float(mx), float(default), step=step, key=f"adv_{key}")
+                        else:
+                            user_inputs[key] = st.number_input(label, int(mn), int(mx), int(default), step=step, key=f"adv_{key}")
 
     st.markdown("<br/>", unsafe_allow_html=True)
     run_btn = st.button("Score Patient", type="primary")
