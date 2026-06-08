@@ -34,9 +34,11 @@ COPY api.py promote_model.py drift_detector.py ./
 # Copy pre-built artefacts (preprocessing pipeline + test data for SHAP background)
 # These are baked into the image; override with a volume mount in docker-compose for dev
 COPY mimic_processed/ ./mimic_processed/
+COPY mlflow.db ./mlflow.db
+COPY mlruns/ ./mlruns/
 
 # Create dirs for runtime files
-RUN mkdir -p /app/logs /app/mlruns
+RUN mkdir -p /app/logs
 
 # Non-root user for security
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app

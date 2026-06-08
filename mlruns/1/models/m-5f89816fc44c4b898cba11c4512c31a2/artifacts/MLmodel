@@ -1,0 +1,23 @@
+artifact_path: file:///C:/Users/21270/Desktop/ICU project/mlruns/1/models/m-5f89816fc44c4b898cba11c4512c31a2/artifacts
+flavors:
+  python_function:
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.sklearn
+    model_path: model.pkl
+    predict_fn: predict
+    python_version: 3.11.9
+  sklearn:
+    code: null
+    pickled_model: model.pkl
+    serialization_format: cloudpickle
+    sklearn_version: 1.8.0
+    skops_trusted_types: null
+mlflow_version: 3.11.1
+model_id: m-5f89816fc44c4b898cba11c4512c31a2
+model_size_bytes: 35794877
+model_uuid: m-5f89816fc44c4b898cba11c4512c31a2
+prompts: null
+run_id: c2c720e1afab482297a8a676210e5956
+utc_time_created: '2026-06-02 19:18:49.859616'

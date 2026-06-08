@@ -1,0 +1,23 @@
+artifact_path: file:///C:/Users/21270/Desktop/ICU project/mlruns/1/models/m-ec38ece63d7a46cea1d302d4fc1945a1/artifacts
+flavors:
+  lightgbm:
+    code: null
+    data: model.pkl
+    lgb_version: 4.6.0
+    model_class: lightgbm.sklearn.LGBMClassifier
+    serialization_format: cloudpickle
+    skops_trusted_types: null
+  python_function:
+    data: model.pkl
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.lightgbm
+    python_version: 3.11.9
+mlflow_version: 3.11.1
+model_id: m-ec38ece63d7a46cea1d302d4fc1945a1
+model_size_bytes: 17311
+model_uuid: m-ec38ece63d7a46cea1d302d4fc1945a1
+prompts: null
+run_id: 89b0d51bf1d94309948a473412c4de09
+utc_time_created: '2026-06-02 19:09:05.589400'

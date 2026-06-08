@@ -7,10 +7,6 @@ __pycache__/
 # DVC
 /plots/
 
-# MLflow
-mlflow.db
-mlruns/
-
 # Prediction log (runtime, not committed)
 prediction_log.jsonl
 
