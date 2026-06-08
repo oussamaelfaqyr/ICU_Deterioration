@@ -40,9 +40,9 @@ stages:
     cmd: python export_streamlit_bundle.py
     deps:
       - export_streamlit_bundle.py
-      - data preparation/mimic_processed/preprocessing_pipeline.joblib
+      - mimic_processed/preprocessing_pipeline.joblib
       - metrics/metrics.json
-      - data preparation/mimic_processed/X_test.npy
-      - data preparation/mimic_processed/y_test.npy
+      - mimic_processed/X_test.npy
+      - mimic_processed/y_test.npy
     outs:
       - streamlit_artifacts/

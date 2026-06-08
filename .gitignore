@@ -18,7 +18,6 @@ prediction_log.jsonl
 .env
 
 # Data artefacts (tracked by DVC, not git)
-mimic_processed/
 data preparation/
 
 # Jupyter
