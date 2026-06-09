@@ -202,14 +202,13 @@ def load_model_and_pipeline():
     state.feature_names = state.pipeline["feature_names"].tolist()
     log.info(f"Loaded preprocessing pipeline ({len(state.feature_names)} features)")
 
-    # Load champion model from MLflow Registry
+    # Load champion model — resolve directly from disk to avoid path issues
+    # when mlflow.db was created on Windows but the container runs on Linux.
     try:
         mv = client.get_model_version_by_alias(REGISTRY_NAME, "champion")
         state.model_version = mv.version
         state.model_type    = mv.tags.get("model_type", "Unknown")
-        model_uri = f"models:/{REGISTRY_NAME}@champion"
     except Exception:
-        # Fallback: load latest version if no alias set yet
         log.warning("No 'champion' alias found, loading latest model version...")
         versions = client.search_model_versions(f"name='{REGISTRY_NAME}'")
         if not versions:
@@ -217,22 +216,55 @@ def load_model_and_pipeline():
         mv = sorted(versions, key=lambda v: int(v.version), reverse=True)[0]
         state.model_version = mv.version
         state.model_type    = mv.tags.get("model_type", "Unknown")
-        model_uri = f"models:/{REGISTRY_NAME}/{mv.version}"
 
     log.info(f"Loading champion model: {REGISTRY_NAME} v{state.model_version} ({state.model_type})")
 
-    # Try native flavors first (gives predict_proba + SHAP support)
-    # then fall back to pyfunc
+    # mv.source is a models:/m-<uuid> URI — find the physical folder.
+    # Actual files live at: mlruns/1/models/<uuid>/artifacts/
+    import re as _re
+    model_dir = None
+
+    m = _re.search(r"models:/(.+)$", mv.source or "")
+    if m:
+        candidate = BASE_DIR / "mlruns" / "1" / "models" / m.group(1) / "artifacts"
+        if candidate.exists():
+            model_dir = candidate
+            log.info(f"Resolved model dir: {model_dir}")
+
+    # Fallback: pick newest mlruns/1/models/*/artifacts that has MLmodel or model.pkl
+    if model_dir is None:
+        models_root = BASE_DIR / "mlruns" / "1" / "models"
+        if models_root.exists():
+            candidates = sorted(
+                [d / "artifacts" for d in models_root.iterdir()
+                 if (d / "artifacts" / "MLmodel").exists()],
+                key=lambda p: p.stat().st_mtime, reverse=True
+            )
+            if candidates:
+                model_dir = candidates[0]
+                log.warning(f"Fallback: using newest model dir by mtime: {model_dir}")
+
+    if model_dir is None:
+        raise RuntimeError(
+            "Cannot locate model artifacts on disk. "
+            "Ensure mlruns/ is included in the Docker image."
+        )
+
+    model_uri = model_dir.as_uri()
+    log.info(f"Loading model from URI: {model_uri}")
+
+    # Try native flavors (predict_proba + SHAP), fall back to pyfunc
     try:
         state.model = mlflow.lightgbm.load_model(model_uri)
-        log.info("Loaded as LightGBM model (predict_proba + SHAP enabled)")
+        log.info("Loaded as LightGBM model")
     except Exception:
         try:
             state.model = mlflow.sklearn.load_model(model_uri)
-            log.info("Loaded as sklearn model (predict_proba + SHAP enabled)")
+            log.info("Loaded as sklearn model")
         except Exception:
             log.warning("Native flavor not available — falling back to pyfunc")
             state.model = mlflow.pyfunc.load_model(model_uri)
+
 
     # Build SHAP explainer on a small background set from test data
     try:
