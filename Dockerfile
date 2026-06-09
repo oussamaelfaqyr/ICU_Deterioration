@@ -36,6 +36,10 @@ COPY api.py promote_model.py drift_detector.py ./
 COPY mimic_processed/ ./mimic_processed/
 COPY mlflow.db ./mlflow.db
 COPY mlruns/ ./mlruns/
+COPY patch_mlflow_paths.py ./patch_mlflow_paths.py
+
+# Patch the MLflow SQLite DB with Docker absolute paths
+RUN python patch_mlflow_paths.py
 
 # Create dirs for runtime files
 RUN mkdir -p /app/logs

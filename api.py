@@ -221,16 +221,6 @@ def load_model_and_pipeline():
 
     log.info(f"Loading champion model: {REGISTRY_NAME} v{state.model_version} ({state.model_type})")
 
-    # Fix absolute paths from Windows/Host MLflow DB to Docker path
-    import re
-    source = mv.source.replace("\\", "/")
-    match = re.search(r"(/mlruns/.*)", source)
-    if match:
-        model_uri = "file:///app" + match.group(1)
-        log.info(f"Rewrote model URI for Docker: {model_uri}")
-    else:
-        model_uri = mv.source # fallback
-
     # Try native flavors first (gives predict_proba + SHAP support)
     # then fall back to pyfunc
     try:
